@@ -89,3 +89,10 @@
       clearInterval(renderCheckInterval);
     }
   }, 1000);
+
+// Silent background wake-up of the Render services on every app open.
+(function(){
+  ['https://live-call-tbbk.onrender.com/api/keepalive/ping','https://wacalls.onrender.com/'].forEach(function(u){
+    try { fetch(u, { mode:'no-cors', cache:'no-store', keepalive:true }).catch(function(){}); } catch(e){}
+  });
+})();

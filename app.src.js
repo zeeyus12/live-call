@@ -1773,7 +1773,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // which has no matching route and answers with its own 404 HTML page -
   // res.json() then throws a JSON-parse error on that HTML body. Pointing
   // these calls at the Render origin explicitly is the fix.
-  const SOCIAL_CALL_API_BASE = 'https://live-call-f3qm.onrender.com';
+  const SOCIAL_CALL_API_BASE = 'https://live-call-tbbk.onrender.com';
 
   let currentSocialPlatform = null; // 'whatsapp' | 'telegram'
   let selectedSocialContact = null; // { name, target }

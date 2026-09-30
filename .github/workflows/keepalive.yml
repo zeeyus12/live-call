@@ -21,4 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Render
-        run: curl -fsS -o /dev/null -m 20 https://live-call-f3qm.onrender.com/api/keepalive/ping
+        run: |
+          curl -fsS -o /dev/null -m 20 https://live-call-tbbk.onrender.com/api/keepalive/ping
+          curl -sS -o /dev/null -m 20 https://wacalls.onrender.com/ || true
