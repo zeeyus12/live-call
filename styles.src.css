@@ -862,6 +862,10 @@
     background:linear-gradient(to bottom, rgba(0,0,0,0.7) 0%, rgba(0,0,0,0) 100%);
     z-index:2;
   }
+  /* Tap the video to hide/show the call controls. */
+  #socialCallTop, #socialCallBottom{ transition:opacity 0.2s; }
+  #socialCallTop.hidden, #socialCallBottom.hidden{ opacity:0; pointer-events:none; }
+  #socialEndBtn{ width:52px; height:52px; }
   #socialCallBottom{
     position:absolute; left:0; right:0; bottom:0;
     padding-bottom:calc(env(safe-area-inset-bottom, 0px) + 28px);

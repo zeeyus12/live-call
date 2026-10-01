@@ -2476,11 +2476,23 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         this.decoder = new window.VideoDecoder({
           output: (frame) => {
             try {
-              if (this.canvas.width !== frame.displayWidth || this.canvas.height !== frame.displayHeight) {
-                this.canvas.width = frame.displayWidth;
-                this.canvas.height = frame.displayHeight;
+              // WhatsApp sends the camera sensor orientation (CVO) with every
+              // frame: a phone held upright arrives turned 90/270 degrees and
+              // the receiver has to rotate it back. Without this the callee
+              // showed up sideways.
+              const rot = this.peerRotation || 0;
+              const fw = frame.displayWidth, fh = frame.displayHeight;
+              const swap = rot === 90 || rot === 270;
+              const cw = swap ? fh : fw, ch = swap ? fw : fh;
+              if (this.canvas.width !== cw || this.canvas.height !== ch) {
+                this.canvas.width = cw;
+                this.canvas.height = ch;
               }
-              this.c2d.drawImage(frame, 0, 0);
+              this.c2d.save();
+              this.c2d.translate(cw / 2, ch / 2);
+              this.c2d.rotate((-rot * Math.PI) / 180);
+              this.c2d.drawImage(frame, -fw / 2, -fh / 2, fw, fh);
+              this.c2d.restore();
               if (!this.pipStream) this.canvas.style.display = 'block'; // legacy overlay fallback
             } catch(e) {}
             try { frame.close(); } catch(e) {}
@@ -2503,6 +2515,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     // framing information is available (the 0x04 media-socket channel).
     pushH264(bytes, wire){
       this.videoAus++;
+      if (wire && typeof wire.rotationDeg === 'number') this.peerRotation = wire.rotationDeg;
       const dec = this.ensureDecoder();
       if (!dec || dec.state !== 'configured') return;
       const isKey = wire && typeof wire.keyframe === 'boolean'
@@ -2520,6 +2533,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       } catch(e) {}
     },
     stop(){
+      this.peerRotation = 0;
       if (this.decoder) { try { this.decoder.close(); } catch(e){} this.decoder = null; }
       if (this.audioCtx) { try { this.audioCtx.close(); } catch(e){} this.audioCtx = null; }
       this.nextPlayTime = 0;
@@ -2918,7 +2932,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const flags = bytes[0];
       const tsMs = ((bytes[1] << 24) | (bytes[2] << 16) | (bytes[3] << 8) | bytes[4]) >>> 0;
       this.received.videoFrames++;
-      PeerMediaPlayout.pushH264(bytes.subarray(5), { keyframe: (flags & 1) !== 0, timestampMs: tsMs });
+      // bits 1-2 of the flags byte = rotation: 0, 90, 180 or 270 degrees.
+      PeerMediaPlayout.pushH264(bytes.subarray(5), { keyframe: (flags & 1) !== 0, timestampMs: tsMs, rotationDeg: ((flags >> 1) & 3) * 90 });
       if (this.received.videoFrames === 1) console.log(`[WaCalls] first peer video frame decoded (callId=${this.callId})`);
     },
 
@@ -3338,9 +3353,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       selfVid.style.left = ''; selfVid.style.top = ''; selfVid.style.right = '16px';
     }
     const cleanName = String(name || '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').trim();
-    $('socialCallTargetName').textContent = cleanName || name || 'Contact';
-    $('socialCallPlatformPill').innerHTML = `<span>${label || 'WhatsApp'}</span>`;
-    $('socialCallPlatformPill').className = 'pill whatsapp';
+    // The call screen no longer shows the callee's name or the engine pill.
+    const targetNameEl = $('socialCallTargetName');
+    if (targetNameEl) targetNameEl.textContent = cleanName || name || 'Contact';
+    const platformPillEl = $('socialCallPlatformPill');
+    if (platformPillEl) {
+      platformPillEl.innerHTML = `<span>${label || 'WhatsApp'}</span>`;
+      platformPillEl.className = 'pill whatsapp';
+    }
     $('socialCallStatusLabel').textContent = status || 'Connected';
     $('socialCallTimer').textContent = '00:00';
     socialCallStartedAt = Date.now();
@@ -3418,6 +3438,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         showIncomingWaCallsCall(evt);
         return;
       case 'media-ready':
+        // subtype 'webrtc' only means OUR browser leg finished negotiating,
+        // which happens while the callee's phone is still ringing. Treating
+        // it as "answered" started the avatar (and its greeting) into a
+        // ringing phone. Only the real call-status "connected" counts.
+        if (evt.subtype === 'webrtc') return;
         if (evt.subtype !== 'unheld') fireCallAnswered();
         if (lbl) lbl.textContent = 'Connected';
         $('socialCallIdle') && ($('socialCallIdle').style.display = 'none');
@@ -4917,6 +4942,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         }
       }
     }
+    // Tap anywhere on the video (not on a button, the small thumb or the
+    // incoming banner) to hide / show the top bar and the bottom controls.
+    screen.addEventListener('click', (e) => {
+      if (e.target.closest('#socialCallTop, #socialCallBottom, .socialPipThumb, #socialIncomingBanner')) return;
+      $('socialCallTop')?.classList.toggle('hidden');
+      $('socialCallBottom')?.classList.toggle('hidden');
+    });
+
     [videoA, videoB].forEach((el) => {
       el.addEventListener('pointerdown', onPointerDown);
       el.addEventListener('pointermove', onPointerMove);
@@ -4934,6 +4967,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     // /api/social-call/hangup further down (which deletes it on WaCalls).
     if (currentSocialPlatform === 'whatsapp' && currentCallEngine === 'greenapi') endGreenApiCall();
     $('socialCallScreen').classList.remove('active');
+    $('socialCallTop')?.classList.remove('hidden');
+    $('socialCallBottom')?.classList.remove('hidden');
 
     // Stop converting audio for this call BEFORE closing the media socket,
     // so the stop goes out on the live connection instead of re-opening one
