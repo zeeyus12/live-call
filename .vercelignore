@@ -1,0 +1,5 @@
+server/
+server.mjs
+requirements.txt
+desktop/
+test/
