@@ -103,7 +103,7 @@ function headers(json = false) {
 // non-2xx response (the caller decides what an error means), throws only for a
 // transport failure, so "WaCalls said no" and "WaCalls is unreachable" stay
 // distinguishable in the logs and in the UI.
-async function apiFetch(path, { method = 'GET', body = null, timeoutMs = CONFIG.timeoutMs } = {}) {
+async function apiFetch(path, { method = 'GET', body = null, timeoutMs = CONFIG.timeoutMs, _retried = false } = {}) {
   if (!isConfigured()) {
     const err = new Error('WaCalls is not configured: set WACALLS_URL (and WACALLS_API_KEY if the instance requires one).');
     err.code = 'not_configured';
@@ -123,6 +123,19 @@ async function apiFetch(path, { method = 'GET', body = null, timeoutMs = CONFIG.
     let data = {};
     if (text) {
       try { data = JSON.parse(text); } catch (e) { data = { raw: text.slice(0, 500) }; }
+    }
+    // The WaCalls instance keeps sessions in memory. After a restart/redeploy
+    // (or a re-link that replaced the session) the id we cached is gone and
+    // every /api/sessions/{id}/... route answers 404 "no such session".
+    // Forget the cached id and retry once against a freshly resolved session.
+    const m = path.match(/^\/api\/sessions\/([^/]+)(\/.*)$/);
+    if (!_retried && res.status === 404 && data?.error === 'no such session' && m) {
+      sessionCache = { id: null, resolvedAt: 0 };
+      const freshId = await resolveSession({ force: true });
+      if (freshId && freshId !== m[1]) {
+        warn(`session ${m[1]} is gone on WaCalls; retrying on ${freshId}`);
+        return apiFetch(`/api/sessions/${freshId}${m[2]}`, { method, body, timeoutMs, _retried: true });
+      }
     }
     return { ok: res.ok, status: res.status, data };
   } finally {
@@ -670,7 +683,10 @@ export async function publicStatus({ probe = false, force = false } = {}) {
   try {
     const sessionId = await resolveSession();
     base.sessionId = sessionId;
-    const sessions = sseState.sessions.length ? sseState.sessions : await listSessions();
+    // Always ask the instance. The event-stream snapshot can be stale (or the
+    // stream not running at all), which is why a freshly linked WhatsApp kept
+    // showing "Connect" in the app even though the link had worked.
+    const sessions = await listSessions();
     sseState.sessions = sessions;
     const mine = sessions.find((s) => s.id === sessionId);
     base.paired = !!mine?.paired;

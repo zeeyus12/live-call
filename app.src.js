@@ -4264,8 +4264,17 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
   $('waPhonePairBtn')?.addEventListener('click', async () => {
     const hint = $('waSessionHint'), btn = $('waPhonePairBtn'), out = $('waPhoneCode');
-    const phone = ($('waPhoneInput')?.value || '').replace(/\D/g, '');
-    if (phone.length < 7) { if (hint) hint.textContent = 'Enter your number with country code, no + or spaces.'; return; }
+    // Country code and number are separate fields. Strip everything that is
+    // not a digit, and drop the leading 0 people type from their local format
+    // (0907... -> 907...) so the combined number is a valid international one.
+    const rawNum = ($('waPhoneInput')?.value || '').trim();
+    const cc = ($('waPhoneCC')?.value || '').replace(/\D/g, '');
+    let national = rawNum.replace(/\D/g, '').replace(/^0+/, '');
+    // If they pasted a full +international number into the number box, trust it as is.
+    const phone = rawNum.startsWith('+') ? rawNum.replace(/\D/g, '') : cc + national;
+    if (!rawNum.startsWith('+') && !cc) { if (hint) hint.textContent = 'Enter your country code first (e.g. 234).'; return; }
+    if (national.length < 6 && !rawNum.startsWith('+')) { if (hint) hint.textContent = 'Enter your phone number after the country code.'; return; }
+    if (phone.length < 8) { if (hint) hint.textContent = 'That number looks too short.'; return; }
     btn.disabled = true;
     btn.textContent = 'Getting code…';
     try {
@@ -4416,6 +4425,16 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     } catch(err) {
       console.error('[placeSocialCall] error:', err);
       $('prepErrorHint').textContent = err.message || 'Error starting call';
+      // The avatar source was started before the call request. If the call
+      // never connected there is no call screen (and no End button), so shut
+      // the avatar/media pipelines down instead of leaving them streaming.
+      try { WaCallsMediaLeg.close(); } catch(e){}
+      try { SocialCallMediaAdapter.stop(); } catch(e){}
+      try { LiveSwapMediaSource.stop(); } catch(e){}
+      try { SocialAnamSource.stop(); } catch(e){}
+      try { LucyVoice.stopForCall(); VoiceConversionPlayout.stop(); } catch(e){}
+      currentCallEngine = null;
+      try { await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/hangup', { method: 'POST' }); } catch(e){}
     } finally {
       prepBtn.disabled = false;
       prepBtn.textContent = 'Place Call';
