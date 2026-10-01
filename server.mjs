@@ -931,6 +931,16 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
+      // WaCalls allows ONE active call per client id. A previous call that never
+      // got a clean hangup (page closed or crashed mid-setup, media ICE failure)
+      // still holds that slot, and the next call then never rings. Free it first.
+      const staleCall = currentActiveCall;
+      if (platform === 'whatsapp' && waProvider === 'wacalls' && staleCall?.callId && staleCall.provider === 'wacalls') {
+        try { await wacalls.endCall(staleCall.callId); console.log(`[WaCalls] released stale call ${staleCall.callId} before placing a new one`); }
+        catch (e) { console.warn(`[WaCalls] could not release stale call ${staleCall.callId}: ${e.message}`); }
+        stopWacallsStatePoll();
+      }
+
       currentActiveCall = {
         id: 'call_' + Date.now(),
         platform,

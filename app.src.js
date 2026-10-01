@@ -1841,10 +1841,27 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   const SocialAnamSource = {
     client: null,
     videoEl: null,
+    // Bumped by stop(). Every await in start() re-checks it, so a start() that
+    // is still in flight when the call is cancelled/timed out can never attach
+    // a live avatar session afterwards (the orphaned "avatar already talking,
+    // no call screen, no End button" state).
+    gen: 0,
     getVideoElement(){ return this.videoEl; },
     getStream(){ return this.videoEl && this.videoEl.captureStream ? this.videoEl.captureStream() : null; },
     isActive(){ return !!this.client; },
+    // The avatar's own voice (audio track of the stream Anam plays into the
+    // preview element) - what the callee has to hear.
+    getAudioStream(){
+      const so = this.videoEl && this.videoEl.srcObject;
+      const tracks = so && so.getAudioTracks ? so.getAudioTracks() : [];
+      return tracks.length ? new MediaStream(tracks) : null;
+    },
     async start(){
+      const gen = ++this.gen;
+      const stale = () => gen !== this.gen;
+      // In a WaCalls avatar call this is the callee's voice; otherwise null and
+      // the SDK behaves exactly as before (its own microphone).
+      const calleeStream = CalleeAudioBus.stream();
       const vid = $('prepAvatarPreview');
       this.videoEl = vid;
       if (!state.anamKeySet) throw new Error('Add your Anam API key in Profile settings first.');
@@ -1855,16 +1872,22 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         body: JSON.stringify({ action: 'session', avatarId: state.anamAvatarId, voiceId: state.anamVoiceId, systemPrompt: promptWithLanguage() }),
       });
       const data = await resp.json();
+      if (stale()) return;
       if (!resp.ok) throw new Error('Anam error: ' + JSON.stringify(data.error));
 
       const { createClient, AnamEvent } = await import('https://esm.sh/@anam-ai/js-sdk@latest');
-      this.client = createClient(data.sessionToken);
-      vid.muted = false;
+      if (stale()) return;
+      const client = createClient(data.sessionToken);
+      this.client = client;
+      // During a call the avatar's voice goes to the callee over the call; it
+      // is not also played out loud here.
+      vid.muted = !!calleeStream;
       vid.volume = 1.0;
       vid.style.display = 'block';
       $('prepAvatarPlaceholder').style.display = 'none';
       const idle = $('socialCallIdle');
-      this.client.addListener(AnamEvent.VIDEO_PLAY_STARTED, () => {
+      client.addListener(AnamEvent.VIDEO_PLAY_STARTED, () => {
+        if (stale()) return;
         if (idle) idle.style.display = 'none';
         $('prepLucyStatus').textContent = 'Avatar ready';
         $('prepLucyDot')?.classList.add('live');
@@ -1877,26 +1900,20 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         const remoteVid = $('socialRemoteVideo');
         if (remoteVid && vid.srcObject) remoteVid.srcObject = vid.srcObject;
       });
-      this.client.addListener(AnamEvent.CONNECTION_CLOSED, () => {
-        this.client = null;
-        if ($('socialCallScreen')?.classList.contains('active')) endSocialCall();
+      client.addListener(AnamEvent.CONNECTION_CLOSED, () => {
+        if (this.client === client) this.client = null;
+        if (!stale() && $('socialCallScreen')?.classList.contains('active')) endSocialCall();
       });
-      await this.client.streamToVideoElement('prepAvatarPreview');
+      await client.streamToVideoElement('prepAvatarPreview', calleeStream || undefined);
+      if (stale()) { try { client.stopStreaming(); } catch(e){} return; }
 
-      // Avatar mode doesn't need your camera for the call itself, but the
-      // self-view PIP still needs something to show - best-effort only,
-      // never blocks the call if the camera isn't available/granted.
-      try {
-        if (!lfLocalStream) {
-          lfLocalStream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-          });
-        }
-        const selfVid = $('socialSelfVideo');
-        if (selfVid) selfVid.srcObject = lfLocalStream;
-      } catch(e) { /* self-view preview only - fine to skip */ }
+      // NOTE: no getUserMedia({video}) here any more. Avatar mode never needs
+      // the caller's camera; it used to be opened only to fill the small PIP
+      // with the caller's own face (and light the camera indicator). The PIP
+      // now carries the PERSON BEING CALLED - see PeerMediaPlayout.attachToPip.
     },
     stop(){
+      this.gen++;
       if (this.client) { try { this.client.stopStreaming(); } catch(e){} this.client = null; }
       if (this.videoEl) { this.videoEl.style.display = 'none'; }
       const ph = $('prepAvatarPlaceholder');
@@ -2344,6 +2361,48 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // either way. Used by WaCallsMediaLeg (the peer's audio and video arrive on
   // WaCalls' own "pcm" / "vp8" data channels) and by the media-socket peer
   // channels (0x03/0x04) that engines with server-side media use.
+  // The CALLEE's voice as a MediaStream. WaCalls delivers it as raw 16 kHz PCM
+  // on the "pcm" data channel; this turns it into a stream the Anam avatar can
+  // use as ITS microphone, so in avatar mode the avatar listens to the person
+  // being called and the caller's own mic is never opened.
+  const CalleeAudioBus = {
+    ctx: null, dest: null, next: 0, active: false,
+    start(){
+      if (this.active) return this.dest.stream;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AC({ sampleRate: 16000 });
+      this.dest = this.ctx.createMediaStreamDestination();
+      this.next = 0;
+      this.active = true;
+      if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+      return this.dest.stream;
+    },
+    stream(){ return this.active ? this.dest.stream : null; },
+    push(int16){
+      if (!this.active || !int16 || !int16.length) return;
+      try {
+        const ctx = this.ctx;
+        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+        const f32 = new Float32Array(int16.length);
+        for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 0x8000;
+        const buf = ctx.createBuffer(1, f32.length, 16000);
+        buf.copyToChannel(f32, 0);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(this.dest);
+        const now = ctx.currentTime;
+        if (this.next < now) this.next = now + 0.04;
+        src.start(this.next);
+        this.next += buf.duration;
+      } catch(e) {}
+    },
+    stop(){
+      this.active = false;
+      if (this.ctx) { try { this.ctx.close(); } catch(e){} }
+      this.ctx = null; this.dest = null; this.next = 0;
+    },
+  };
+
   const PeerMediaPlayout = {
     audioCtx: null,
     nextPlayTime: 0,
@@ -2361,6 +2420,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       return this.audioCtx;
     },
     playPcm(int16){
+      CalleeAudioBus.push(int16); // no-op unless an avatar call is listening
       try {
         const ctx = this.ensureAudioCtx();
         const f32 = new Float32Array(int16.length);
@@ -2379,12 +2439,39 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         this.audioFrames++;
       } catch(e) { /* no audio device / autoplay blocked - not worth killing a call */ }
     },
+    pipStream: null,
+    // Routes the decoded peer camera into #socialSelfVideo (the PIP/split
+    // slot) by capturing the decode canvas as a MediaStream. That makes the
+    // callee a normal <video> in the layout the user already has - PIP, split,
+    // tap-to-swap and drag all keep working untouched - instead of a separate
+    // overlay. Falls back to the old overlay canvas if captureStream is missing.
+    attachToPip(){
+      if (this.pipStream) return true;
+      const canvas = this.canvas || $('socialPeerCanvas');
+      const sv = $('socialSelfVideo');
+      if (!canvas || !sv || typeof canvas.captureStream !== 'function') return false;
+      try {
+        this.pipStream = canvas.captureStream(15);
+        sv.srcObject = this.pipStream;
+        sv.dataset.feed = 'peer'; // CSS un-mirrors it (the self-view mirror is for cameras)
+        const p = sv.play && sv.play(); if (p && p.catch) p.catch(() => {});
+        // Keep the canvas in the DOM (some browsers stop capturing a
+        // display:none canvas) but invisible: the <video> is what is shown.
+        canvas.style.cssText = 'position:absolute;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none;';
+        return true;
+      } catch(e) {
+        console.warn('[PeerMedia] could not route the peer video into the PIP:', e.message);
+        this.pipStream = null;
+        return false;
+      }
+    },
     ensureDecoder(){
       if (this.decoder) return this.decoder;
       if (typeof window.VideoDecoder === 'undefined') return null;
       this.canvas = $('socialPeerCanvas');
       if (!this.canvas) return null;
       this.c2d = this.canvas.getContext('2d');
+      this.attachToPip();
       try {
         this.decoder = new window.VideoDecoder({
           output: (frame) => {
@@ -2394,7 +2481,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
                 this.canvas.height = frame.displayHeight;
               }
               this.c2d.drawImage(frame, 0, 0);
-              this.canvas.style.display = 'block';
+              if (!this.pipStream) this.canvas.style.display = 'block'; // legacy overlay fallback
             } catch(e) {}
             try { frame.close(); } catch(e) {}
           },
@@ -2440,6 +2527,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       this.videoAus = 0;
       const canvas = $('socialPeerCanvas');
       if (canvas) canvas.style.display = 'none';
+      if (this.pipStream) {
+        try { this.pipStream.getTracks().forEach(t => t.stop()); } catch(e){}
+        this.pipStream = null;
+        const sv = $('socialSelfVideo');
+        if (sv) { sv.srcObject = null; delete sv.dataset.feed; }
+      }
     },
   };
 
@@ -2487,6 +2580,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     micCtx: null,
     micSource: null,
     micNode: null,
+    outStream: null, // the avatar's voice, when it is the outgoing audio (avatar mode)
     canvas: null,
     ctx: null,
     encoder: null,
@@ -2557,8 +2651,18 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       try { this.pcmDC.send(bytes); this.sent.audioFrames++; } catch (e) {}
     },
 
+    // Avatar mode: the call audio is the avatar's own voice, not a microphone.
+    // Can be attached before or after the leg is open (the avatar is started
+    // when the callee answers, which may be before or after negotiation ends).
+    attachOutgoingAudio(stream){
+      this.outStream = stream || null;
+      if (this.active && stream) this.startAudio(false, stream);
+    },
+
     async open({ callId, video = true, source = 'lucy', voiceConversion = false } = {}){
+      const keepOut = this.outStream;
       if (this.active) this.close();
+      this.outStream = keepOut;
       this.callId = callId;
       this.video = !!video;
       this.source = source === 'anam' ? 'anam' : 'lucy';
@@ -2568,7 +2672,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       console.log(`[WaCalls] opening media leg for callId=${callId} (video=${this.video}, avatar=${this.source}, voiceConversion=${voiceConversion})`);
 
       try {
-        const pc = new RTCPeerConnection({ iceServers: [] });
+        // A public STUN server lets the browser publish its public (server-
+        // reflexive) address; with an empty list a phone on cellular/NAT only
+        // offers private host candidates that WaCalls cannot reach.
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
         this.pc = pc;
 
         // --- data channels (must exist before the offer) -------------------
@@ -2587,29 +2694,46 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         pc.oniceconnectionstatechange = () => {
           if (!this.active) return;
           const st = pc.iceConnectionState;
+          console.log(`[WaCalls] media ICE state: ${st} (callId=${this.callId})`);
           if (st === 'failed') {
             console.error(`[WaCalls] media connection FAILED for callId=${this.callId}`);
             showCallFailureAndEnd('Call media connection lost');
           }
         };
 
-        this.startAudio(voiceConversion);
+        if (this.source === 'anam') {
+          // No microphone in avatar mode: wait for the avatar's own voice.
+          if (this.outStream) this.startAudio(false, this.outStream);
+        } else {
+          this.startAudio(voiceConversion);
+        }
         if (this.video) this.startVideo();
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        // Wait for ICE gathering, but never indefinitely: 2.5 s is plenty for
+        // host + STUN candidates and the offer goes out with whatever exists.
         await new Promise((resolve) => {
           if (pc.iceGatheringState === 'complete') return resolve();
+          const t = setTimeout(resolve, 2500);
           pc.addEventListener('icegatheringstatechange', () => {
-            if (pc.iceGatheringState === 'complete') resolve();
+            if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); }
           });
         });
 
-        const res = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/wacalls/webrtc', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ callId, sdp_offer: pc.localDescription.sdp }),
-        });
+        const relayCtl = new AbortController();
+        const relayTimer = setTimeout(() => relayCtl.abort(), 20000);
+        let res;
+        try {
+          res = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/wacalls/webrtc', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callId, sdp_offer: pc.localDescription.sdp }),
+            signal: relayCtl.signal,
+          });
+        } catch (e) {
+          throw new Error(e.name === 'AbortError' ? 'WaCalls did not answer the media offer within 20s' : e.message);
+        } finally { clearTimeout(relayTimer); }
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.sdp_answer) {
           throw new Error(data.error || `WaCalls refused the media offer (HTTP ${res.status})`);
@@ -2624,9 +2748,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     },
 
     // --- audio -----------------------------------------------------------
-    startAudio(voiceConversion){
+    startAudio(voiceConversion, overrideStream){
       this.setVoiceConversion(voiceConversion);
-      const stream = voiceConversion ? outgoingCallAudioStream() : socialMicStream;
+      // Replace any previous capture graph (the avatar's voice can arrive after
+      // an earlier attach attempt).
+      if (this.micNode) { try { this.micNode.disconnect(); } catch (e) {} this.micNode = null; }
+      if (this.micSource) { try { this.micSource.disconnect(); } catch (e) {} this.micSource = null; }
+      if (this.micCtx) { try { this.micCtx.close(); } catch (e) {} this.micCtx = null; }
+      const stream = overrideStream || (voiceConversion ? outgoingCallAudioStream() : socialMicStream);
       if (!stream || !stream.getAudioTracks().length) {
         console.warn('[WaCalls] no microphone stream available for the call audio');
         return;
@@ -2634,6 +2763,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       try {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         this.micCtx = new AudioCtx({ sampleRate: 16000 });
+        if (this.micCtx.state === 'suspended') this.micCtx.resume().catch(() => {});
         this.micSource = this.micCtx.createMediaStreamSource(stream);
         // 512-sample buffers while converting (the converter is fed one chunk
         // per round trip, so a bigger buffer would add its whole length in
@@ -2809,6 +2939,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (this.pcmDC) { try { this.pcmDC.close(); } catch (e) {} this.pcmDC = null; }
       if (this.videoDC) { try { this.videoDC.close(); } catch (e) {} this.videoDC = null; }
       if (this.pc) { try { this.pc.close(); } catch (e) {} this.pc = null; }
+      this.outStream = null;
       PeerMediaPlayout.stop();
       if (wasActive) {
         console.log(`[WaCalls] media leg closed for callId=${this.callId} (sent ${sent.audioFrames} audio / ${sent.videoFrames} video frames, keyframe requests ${sent.keyframeRequests}, received ${received.audioFrames} audio / ${received.videoFrames} video)`);
@@ -3135,7 +3266,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     currentCallEngine = 'wacalls';
     selectedSocialContact = { name: call.peer, target: call.peer };
 
-    if (!socialMicStream) {
+    const avatarAnswer = selectedCallSource === 'avatar';
+    if (avatarAnswer) {
+      CalleeAudioBus.start(); // the avatar listens to the caller; no microphone is opened
+    } else if (!socialMicStream) {
       socialMicStream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
       if (!socialMicStream) throw new Error('Microphone permission required to answer a call');
     }
@@ -3166,6 +3300,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       source: selectedCallSource === 'avatar' ? 'anam' : 'lucy',
       voiceConversion: useVoiceConversion,
     });
+    if (avatarAnswer) {
+      const voice = await waitForAvatarAudio(8000);
+      if (voice) WaCallsMediaLeg.attachOutgoingAudio(voice);
+      else console.warn('[WaCalls] the avatar produced no audio track - the caller will not hear it');
+    }
 
     // Our own video has to be signalled to WhatsApp for an incoming video call
     // (the peer asked for video; a silent leg would answer in audio only).
@@ -3279,6 +3418,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         showIncomingWaCallsCall(evt);
         return;
       case 'media-ready':
+        if (evt.subtype !== 'unheld') fireCallAnswered();
         if (lbl) lbl.textContent = 'Connected';
         $('socialCallIdle') && ($('socialCallIdle').style.display = 'none');
         stopRingback();
@@ -3356,6 +3496,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         if (lbl) lbl.textContent = 'Connecting…';
         startRingback(); // keep playing through connecting - stops only once truly connected
       } else if (msg.state === 'connected') {
+        fireCallAnswered();
         if (lbl) lbl.textContent = 'Connected';
         const idle = $('socialCallIdle');
         if (idle) idle.style.display = 'none';
@@ -3963,15 +4104,56 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // ---------------------------------------------------------------
   const CONTACTS_KEY = 'lc_saved_contacts_v1';
   let editingContactId = null;
-  function loadSavedContacts(){
+  // Source of truth is the Supabase `contacts` table (sql/009_contacts.sql);
+  // this array is the in-memory copy the synchronous renderers read, and
+  // localStorage is kept only as an offline fallback / one-time migration source.
+  let savedContactsCache = null;
+  const isUuid = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
+  function readLocalContacts(){
     try {
       const list = JSON.parse(localStorage.getItem(CONTACTS_KEY) || '[]');
       return Array.isArray(list) ? list : [];
     } catch(e){ return []; }
   }
+  function loadSavedContacts(){
+    return savedContactsCache || readLocalContacts();
+  }
   function storeSavedContacts(list){
+    savedContactsCache = list;
     try { localStorage.setItem(CONTACTS_KEY, JSON.stringify(list)); return true; }
     catch(e){ return false; }
+  }
+  const CONTACT_COLS = 'id,name,cc,number,target';
+  // Pulls the user's contacts from Supabase and uploads any that only exist on
+  // this device (contacts saved before the cloud table existed).
+  async function syncSavedContacts(){
+    if (!currentUser) return;
+    try {
+      const { data, error } = await supabase.from('contacts').select(CONTACT_COLS).order('name');
+      if (error) throw error;
+      const cloud = data || [];
+      const have = new Set(cloud.map(c => c.target));
+      const missing = readLocalContacts().filter(c => c && c.target && !have.has(c.target));
+      if (missing.length) {
+        const rows = missing.map(c => ({ user_id: currentUser.id, name: c.name, cc: c.cc, number: c.number, target: c.target }));
+        const { data: ins, error: e2 } = await supabase.from('contacts')
+          .upsert(rows, { onConflict: 'user_id,target' }).select(CONTACT_COLS);
+        if (!e2 && ins) cloud.push(...ins);
+        else if (e2) console.warn('[contacts] could not upload local contacts:', e2.message);
+      }
+      storeSavedContacts(cloud);
+      renderContactsTab();
+    } catch(e) {
+      console.warn('[contacts] Supabase sync failed, using this device\'s copy:', e.message || e);
+    }
+  }
+  async function saveContactToCloud(contact){
+    if (!currentUser) return { error: { message: 'not signed in' } };
+    const row = { user_id: currentUser.id, name: contact.name, cc: contact.cc, number: contact.number, target: contact.target };
+    if (isUuid(contact.id)) {
+      return supabase.from('contacts').update(row).eq('id', contact.id).select(CONTACT_COLS).single();
+    }
+    return supabase.from('contacts').upsert(row, { onConflict: 'user_id,target' }).select(CONTACT_COLS).single();
   }
   function savedContactsForPicker(){
     return loadSavedContacts()
@@ -4038,7 +4220,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   $('addContactBtn')?.addEventListener('click', () => openContactEditor(null));
   $('closeContactEditor')?.addEventListener('click', () => $('contactEditor').classList.remove('active'));
   $('contactsTabSearch')?.addEventListener('input', renderContactsTab);
-  $('contactSaveBtn')?.addEventListener('click', () => {
+  $('contactSaveBtn')?.addEventListener('click', async () => {
     const err = $('contactEditorError');
     const name = $('contactNameInput').value.trim();
     const cc = $('contactCCInput').value.replace(/\D/g, '');
@@ -4047,22 +4229,29 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     if (!cc) { err.textContent = 'Enter the country code first (e.g. 234).'; return; }
     if (number.length < 6) { err.textContent = 'Enter the phone number after the country code.'; return; }
     const target = cc + number;
-    const list = loadSavedContacts();
+    const list = loadSavedContacts().slice();
     const dupe = list.find(x => x.target === target && x.id !== editingContactId);
     if (dupe) { err.textContent = 'That number is already saved as "' + dupe.name + '".'; return; }
-    if (editingContactId) {
-      const i = list.findIndex(x => x.id === editingContactId);
-      if (i >= 0) list[i] = { ...list[i], name, cc, number, target };
-    } else {
-      list.push({ id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, cc, number, target });
-    }
+    const existing = editingContactId ? list.find(x => x.id === editingContactId) : null;
+    let saved = { id: existing ? existing.id : 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, cc, number, target };
+    // Cloud first. If it fails (offline, table not created yet) the contact is
+    // still kept on this device and uploaded by the next sync.
+    const { data: cloudRow, error: cloudErr } = await saveContactToCloud(saved);
+    if (cloudRow) saved = cloudRow;
+    else console.warn('[contacts] saved on this device only:', cloudErr && cloudErr.message);
+    const i = list.findIndex(x => x.id === (existing ? existing.id : saved.id));
+    if (i >= 0) list[i] = saved; else list.push(saved);
     if (!storeSavedContacts(list)) { err.textContent = 'Could not save on this device (storage is blocked or full).'; return; }
     $('contactEditor').classList.remove('active');
     renderContactsTab();
   });
-  $('contactDeleteBtn')?.addEventListener('click', () => {
+  $('contactDeleteBtn')?.addEventListener('click', async () => {
     if (!editingContactId) return;
     if (!confirm('Delete this contact?')) return;
+    if (isUuid(editingContactId)) {
+      const { error } = await supabase.from('contacts').delete().eq('id', editingContactId);
+      if (error) console.warn('[contacts] cloud delete failed:', error.message);
+    }
     storeSavedContacts(loadSavedContacts().filter(x => x.id !== editingContactId));
     $('contactEditor').classList.remove('active');
     renderContactsTab();
@@ -4432,14 +4621,55 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     await fetchWaCallsStatus();
   });
 
+  // Bumped on every attempt and by endSocialCall(): a setup that finds its own
+  // number is no longer current was cancelled (End pressed, or a newer attempt)
+  // and must stop quietly instead of carrying on to place a call.
+  let callAttemptSeq = 0;
+  // Set by placeSocialCall() for a WaCalls avatar call: runs once, when the
+  // callee actually picks up. The avatar is NOT started before that, so it
+  // cannot talk into a ringing phone or burn an avatar session on a call that
+  // is never answered.
+  let onCallAnswered = null;
+  function fireCallAnswered(){
+    if (!onCallAnswered) return;
+    const f = onCallAnswered; onCallAnswered = null;
+    try { f(); } catch(e) { console.warn('[call] answered-hook failed:', e.message); }
+  }
+  async function waitForAvatarAudio(ms){
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      const a = SocialAnamSource.getAudioStream();
+      if (a) return a;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    return null;
+  }
+
+  function withTimeout(promise, ms, label){
+    let t;
+    const timeout = new Promise((_, rej) => {
+      t = setTimeout(() => rej(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+  }
+
   async function placeSocialCall(){
     const prepBtn = $('prepStartCallActionBtn');
     prepBtn.disabled = true;
     prepBtn.textContent = 'Starting Lucy 2.5 & Calling…';
     $('prepErrorHint').textContent = '';
 
+    const attempt = ++callAttemptSeq;
+    const cancelled = () => attempt !== callAttemptSeq;
+    const setStatus = (text) => { const l = $('socialCallStatusLabel'); if (l && !cancelled()) l.textContent = text; };
+    let callScreenShown = false;
+    // WhatsApp through WaCalls with an Anam avatar: nothing from the caller's
+    // own devices is used. The avatar listens to the callee and speaks to them.
+    const avatarOnWaCalls = selectedCallSource === 'avatar' && currentSocialPlatform === 'whatsapp' && waEngine() === 'wacalls';
+
     try {
-      if (!socialMicStream) {
+      if (avatarOnWaCalls) CalleeAudioBus.start(); // inside the tap, so the audio context is allowed to run
+      if (!avatarOnWaCalls && !socialMicStream) {
         try {
           socialMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
           $('prepMicStatus').textContent = 'Microphone: Active';
@@ -4450,94 +4680,116 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           return;
         }
       }
-
-      // Activate whichever outgoing source was picked - Lucy 2.5 (live face
-      // swap of your own camera) or an Anam AI avatar - as the automatic
-      // Step 4 & 5 (NO tab switch needed).
-      await activeSocialSource().start({ forSocialCall: true });
+      if (cancelled()) return;
 
       // Which WhatsApp engine carries this call. Captured NOW rather than
       // read again at hangup, so switching engines mid-call can't send the
       // teardown to the wrong backend.
       currentCallEngine = currentSocialPlatform === 'whatsapp' ? waEngine() : null;
 
-      // Place call on backend bridge
-      const res = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/call', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          platform: currentSocialPlatform,
-          target: selectedSocialContact.target,
-          name: selectedSocialContact.name,
-          // Explicit provider selection. Omitted for Telegram; for WhatsApp
-          // 'greenapi' reproduces exactly the previous behaviour.
-          provider: currentCallEngine || undefined,
-          video: true,
-          // Which avatar is feeding the outgoing video - recorded by the
-          // bridge for the call record. The bytes themselves are the same
-          // either way (see AvatarMediaSource below).
-          source: selectedCallSource === 'avatar' ? 'anam' : 'lucy',
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to place call');
-
-      // Realtime RVC conversion of the outgoing Lucy 2.5 audio - Lucy source
-      // only, and only if the backend can actually convert (a model is loaded
-      // and voice-changer is reachable). Started before the call's audio path
-      // is established so the very first spoken frame is converted.
-      const useVoiceConversion = selectedCallSource === 'lucy' && LucyVoice.enabled && LucyVoice.canEnable();
-      if (useVoiceConversion) {
-        await LucyVoice.startForCall(currentSocialPlatform);
-        // Only WhatsApp needs the converted audio back in this browser: its
-        // call audio is a browser-side WebRTC track. Telegram's outgoing
-        // audio is written into the call server-side, so building a playout
-        // here would just be a silent graph doing nothing.
-        if (currentSocialPlatform === 'whatsapp') await VoiceConversionPlayout.start();
-      }
-
-      if (currentSocialPlatform === 'whatsapp' && currentCallEngine === 'greenapi') {
-        // Actual ringing happens here, client-side - the backend POST
-        // above only recorded call state/history, it never rings anyone
-        // for WhatsApp (see server.mjs's call route comments).
-        await startGreenApiCall(selectedSocialContact.target, { voiceConversion: useVoiceConversion });
-      }
-      if (currentSocialPlatform === 'whatsapp' && currentCallEngine === 'wacalls') {
-        // The REAL call was already placed by WaCalls (offer + relay + E2E
-        // media on its side). What remains is this browser's own media leg to
-        // the WaCalls server: data channels up (avatar video + call audio) and
-        // down (the peer's audio/video). Opening it is what makes the call an
-        // actual video call - the offer carries the "vp8" channel.
-        await WaCallsMediaLeg.open({
-          callId: data.call.callId,
-          video: data.call.videoRequested !== false,
-          source: selectedCallSource === 'avatar' ? 'anam' : 'lucy',
-          voiceConversion: useVoiceConversion,
-        });
-        console.log(`[WaCalls] outgoing call ${data.call.callId} ready (avatar=${selectedCallSource === 'avatar' ? 'Anam' : 'Lucy 2.5'})`);
-      }
-
-      // Transition to Active Call UI (shared with the answered-incoming path,
-      // so layout reset, name handling and the timer behave identically for
-      // both directions). The name is stripped of emoji: contact names often
-      // carry decorative ones saved on the phone itself, which read oddly
-      // stacked above the "Ringing… · 00:00" line.
+      // The call screen (with its End button) comes up FIRST, before anything
+      // slow. It used to appear only after the avatar had started, the call
+      // was placed and the media leg had negotiated - so any stall in those
+      // left the avatar running behind a prep modal with no way to hang up.
       const platformLabel = currentSocialPlatform === 'whatsapp'
         ? `WhatsApp${currentCallEngine === 'wacalls' ? ' · WaCalls' : ''}`
         : 'Telegram';
       showSocialCallScreen({
         name: selectedSocialContact.name || selectedSocialContact.target,
         label: platformLabel,
-        status: 'Ringing…',
+        status: 'Starting avatar…',
       });
+      callScreenShown = true;
+
+      // Activate whichever outgoing source was picked - Lucy 2.5 (live face
+      // swap of your own camera) or an Anam AI avatar.
+      const startAvatar = async () => {
+        setStatus('Starting avatar…');
+        await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
+        if (cancelled()) { try { activeSocialSource().stop(); } catch(e){} return; }
+        if (avatarOnWaCalls) {
+          const voice = await waitForAvatarAudio(8000);
+          if (cancelled()) return;
+          if (voice) WaCallsMediaLeg.attachOutgoingAudio(voice);
+          else console.warn('[WaCalls] the avatar produced no audio track - the callee will not hear it');
+          setStatus('Connected');
+        }
+      };
+      if (avatarOnWaCalls) {
+        // Start the avatar when the callee answers, not before.
+        onCallAnswered = () => {
+          startAvatar().catch((e) => { if (!cancelled()) showCallFailureAndEnd(e.message || 'Could not start the avatar'); });
+        };
+      } else {
+        await startAvatar();
+      }
+
+      setStatus('Calling…');
+      // Place call on backend bridge
+      const ctl = new AbortController();
+      const placeTimer = setTimeout(() => ctl.abort(), 25000);
+      let res;
+      try {
+        res = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/call', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: ctl.signal,
+          body: JSON.stringify({
+            platform: currentSocialPlatform,
+            target: selectedSocialContact.target,
+            name: selectedSocialContact.name,
+            // Explicit provider selection. Omitted for Telegram; for WhatsApp
+            // 'greenapi' reproduces exactly the previous behaviour.
+            provider: currentCallEngine || undefined,
+            video: true,
+            // Which avatar is feeding the outgoing video - recorded by the
+            // bridge for the call record.
+            source: selectedCallSource === 'avatar' ? 'anam' : 'lucy',
+          }),
+        });
+      } catch (e) {
+        throw new Error(e.name === 'AbortError' ? 'Placing the call timed out after 25s' : e.message);
+      } finally { clearTimeout(placeTimer); }
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to place call');
+      if (cancelled()) {
+        // End was pressed while the request was in flight: the call may now
+        // exist on the server, so make sure it is torn down there too.
+        try { await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/hangup', { method: 'POST' }); } catch(e){}
+        return;
+      }
+
+      // Realtime RVC conversion of the outgoing Lucy 2.5 audio - Lucy source
+      // only, and only if the backend can actually convert.
+      const useVoiceConversion = selectedCallSource === 'lucy' && LucyVoice.enabled && LucyVoice.canEnable();
+      if (useVoiceConversion) {
+        await LucyVoice.startForCall(currentSocialPlatform);
+        if (currentSocialPlatform === 'whatsapp') await VoiceConversionPlayout.start();
+      }
+
+      if (currentSocialPlatform === 'whatsapp' && currentCallEngine === 'greenapi') {
+        // Actual ringing happens here, client-side - the backend POST
+        // above only recorded call state/history.
+        await startGreenApiCall(selectedSocialContact.target, { voiceConversion: useVoiceConversion });
+      }
+      if (currentSocialPlatform === 'whatsapp' && currentCallEngine === 'wacalls') {
+        // The REAL call was already placed by WaCalls. What remains is this
+        // browser's own media leg to the WaCalls server. The phone is already
+        // ringing by now, so say so while the leg negotiates.
+        setStatus('Ringing…');
+        await withTimeout(WaCallsMediaLeg.open({
+          callId: data.call.callId,
+          video: data.call.videoRequested !== false,
+          source: selectedCallSource === 'avatar' ? 'anam' : 'lucy',
+          voiceConversion: useVoiceConversion,
+        }), 30000, 'Connecting call media');
+        if (cancelled()) return;
+        console.log(`[WaCalls] outgoing call ${data.call.callId} ready (avatar=${selectedCallSource === 'avatar' ? 'Anam' : 'Lucy 2.5'})`);
+      }
 
       // Start streaming outgoing video frames & live audio through adapter.
-      // With conversion on, that audio is fed through RVC on the server: for
-      // Telegram it becomes the audio track written alongside the Lucy video,
-      // for WhatsApp it comes back here (channel 0x04) as the call's outgoing
-      // audio track.
-      SocialCallMediaAdapter.startStreaming(activeSocialSource().getStream(), socialMicStream, {
+      SocialCallMediaAdapter.startStreaming(avatarOnWaCalls ? null : activeSocialSource().getStream(), socialMicStream, {
         voiceConversion: useVoiceConversion,
         // WaCalls has its own media plane (see WaCallsMediaLeg); this socket
         // stays for the event stream and the RVC return path only.
@@ -4545,17 +4797,27 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       });
 
     } catch(err) {
+      if (cancelled()) return; // End was pressed: endSocialCall() already cleaned up
       console.error('[placeSocialCall] error:', err);
-      $('prepErrorHint').textContent = err.message || 'Error starting call';
-      // The avatar source was started before the call request. If the call
-      // never connected there is no call screen (and no End button), so shut
-      // the avatar/media pipelines down instead of leaving them streaming.
+      // Tear down everything this attempt started, hide the call screen again
+      // and put the real reason back on the prep modal where it can be read.
       try { WaCallsMediaLeg.close(); } catch(e){}
       try { SocialCallMediaAdapter.stop(); } catch(e){}
       try { LiveSwapMediaSource.stop(); } catch(e){}
       try { SocialAnamSource.stop(); } catch(e){}
+      try { PeerMediaPlayout.stop(); } catch(e){}
       try { LucyVoice.stopForCall(); VoiceConversionPlayout.stop(); } catch(e){}
+      onCallAnswered = null;
+      try { CalleeAudioBus.stop(); } catch(e){}
       currentCallEngine = null;
+      callAttemptSeq++;
+      clearInterval(socialCallDurationTimer);
+      stopRingback();
+      if (callScreenShown) {
+        $('socialCallScreen').classList.remove('active');
+        $('callPrepModal').classList.add('active');
+      }
+      $('prepErrorHint').textContent = err.message || 'Error starting call';
       try { await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/hangup', { method: 'POST' }); } catch(e){}
     } finally {
       prepBtn.disabled = false;
@@ -4664,6 +4926,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   })();
 
   async function endSocialCall(){
+    callAttemptSeq++; // cancels a placeSocialCall() that is still setting up
     clearInterval(socialCallDurationTimer);
     stopRingback();
     // Only the engine that carried THIS call is torn down: Green API's browser
@@ -4687,6 +4950,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     LiveSwapMediaSource.stop();
     SocialAnamSource.stop();
     PeerMediaPlayout.stop();
+    onCallAnswered = null;
+    CalleeAudioBus.stop();
     currentCallEngine = null;
 
     if (socialMicStream) {
@@ -4767,6 +5032,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     await loadSettings();
     loadAnamAvatars();
     loadAnamVoices();
+    syncSavedContacts();
     splashAuthDone = true; maybeHideSplash();
   }
 

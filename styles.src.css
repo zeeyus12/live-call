@@ -826,6 +826,9 @@
   #socialRemoteVideo, #socialSelfVideo{
     border:0; background:#000; object-fit:cover; transform:scaleX(-1);
   }
+  /* The small/second pane now carries the PERSON BEING CALLED (their decoded
+     camera), not a mirror of your own camera - so it must not be mirrored. */
+  #socialSelfVideo[data-feed="peer"]{ transform:none; }
 
   /* --- PIP mode (default) --- */
   #socialCallScreen[data-layout="pip"] .socialPipMain{
