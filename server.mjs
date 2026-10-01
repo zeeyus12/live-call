@@ -681,6 +681,18 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (subpath === 'wacalls/pair-phone' && req.method === 'POST') {
+      try {
+        const body = await parseBody(req);
+        const result = await wacalls.pairPhone(String(body.phone || ''));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (e) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: e.message }));
+      }
+    }
+
     if (subpath === 'wacalls/logout' && req.method === 'POST') {
       try {
         const result = await wacalls.logoutSession();

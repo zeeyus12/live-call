@@ -4178,7 +4178,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           : '—';
         videoEl.style.color = state === 'video' ? '#25D366' : (state === 'audio-only' ? '#ffb020' : '#fff');
       }
-      if (hintEl) hintEl.textContent = status?.video?.detail || status?.error || '';
+      if (hintEl) hintEl.textContent = status?.error || '';
       // The QR box is only meaningful while an unlinked session is waiting.
       const qrBox = $('waQrBox');
       if (qrBox) qrBox.style.display = (status?.configured && !status?.paired) ? 'block' : 'none';
@@ -4259,6 +4259,30 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     } finally {
       btn.disabled = false;
       btn.textContent = 'Start pairing (show QR)';
+    }
+  });
+
+  $('waPhonePairBtn')?.addEventListener('click', async () => {
+    const hint = $('waSessionHint'), btn = $('waPhonePairBtn'), out = $('waPhoneCode');
+    const phone = ($('waPhoneInput')?.value || '').replace(/\D/g, '');
+    if (phone.length < 7) { if (hint) hint.textContent = 'Enter your number with country code, no + or spaces.'; return; }
+    btn.disabled = true;
+    btn.textContent = 'Getting code…';
+    try {
+      const res = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/wacalls/pair-phone', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phone })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error || !data.code) throw new Error(data.error || `HTTP ${res.status}`);
+      const c = String(data.code);
+      if (out) { out.textContent = c.length === 8 ? c.slice(0, 4) + '-' + c.slice(4) : c; out.style.display = 'block'; }
+      if (hint) hint.textContent = 'In WhatsApp: Settings > Linked Devices > Link a Device > Link with phone number instead, then type this code.';
+      setTimeout(() => fetchWaCallsStatus({ probe: true }), 20000);
+    } catch(e){
+      if (hint) hint.textContent = e.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Link with phone number (get code)';
     }
   });
 

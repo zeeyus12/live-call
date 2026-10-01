@@ -193,6 +193,14 @@ export async function pairSession() {
   return { sessionId: id };
 }
 
+export async function pairPhone(phone) {
+  const id = await resolveSession({ force: true });
+  const r = await apiFetch(`/api/sessions/${id}/pair-phone`, { method: 'POST', body: { phone }, timeoutMs: 30000 });
+  if (!r.ok) throw new Error(r.data?.error || `WaCalls pairing code failed (HTTP ${r.status})`);
+  log(`session ${id}: phone pairing code issued`);
+  return { sessionId: id, code: r.data?.code };
+}
+
 export async function logoutSession() {
   const id = await resolveSession();
   const r = await apiFetch(`/api/sessions/${id}/logout`, { method: 'POST' });
@@ -689,6 +697,7 @@ export const wacalls = {
   resolveSession,
   listSessions,
   pairSession,
+  pairPhone,
   logoutSession,
   startCall,
   answerCall,
