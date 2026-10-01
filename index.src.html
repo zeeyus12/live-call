@@ -80,6 +80,10 @@
     <svg viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M22 12c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2s10 4.477 10 10zm-4.581 3.324a1 1 0 0 0-.525-1.313L13 12.341V6.5a1 1 0 0 0-2 0v6.17c0 .6.357 1.143.909 1.379l4.197 1.8a1 1 0 0 0 1.313-.525z" fill="currentColor"/></svg>
     Recent
   </button>
+  <button class="tabBtn" data-tab="contacts">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M8 3h9a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" fill="currentColor" fill-opacity="0.35"/><circle cx="12.5" cy="10" r="2.6" fill="currentColor"/><path d="M7.8 17.2c.6-2 2.5-3.2 4.7-3.2s4.1 1.2 4.7 3.2z" fill="currentColor"/><path d="M3 7h3M3 12h3M3 17h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    Contacts
+  </button>
   <button class="tabBtn" data-tab="features">
     <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="#000000"><g id="SVGRepo_bgCarrier" stroke-width="0"></g><g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g><g id="SVGRepo_iconCarrier"> <path d="m 13.265625 10.476562 l 2.1875 -2.476562 h 0.546875 v 5.003906 h -0.535156 z m -6.265625 -3.476562 h 5 c 0.554688 0 1 0.445312 1 1 v 5 c 0 0.554688 -0.445312 1 -1 1 h -5 c -0.554688 0 -1 -0.445312 -1 -1 v -5 c 0 -0.554688 0.445312 -1 1 -1 z m 0 0" fill="#2e3436"></path> <path d="m 4 1.996094 c -0.554688 0 -1 0.445312 -1 1 v 5.007812 c 0 0.550782 0.445312 1 1 1 h 0.996094 v -1.003906 c 0 -1.050781 0.953125 -2.007812 2.003906 -2.003906 h 3 v -3 c 0 -0.554688 -0.445312 -1 -1 -1 z m -4 1.007812 v 5.003906 h 0.480469 l 2.253906 -2.585937 l -2.125 -2.417969 z m 0 0" fill="#2e3434" fill-opacity="0.34902"></path> </g></svg>
     Features
@@ -118,6 +122,15 @@
     <div class="screen" id="screenRecent">
       <h1 class="pageTitle">Recent</h1>
       <div id="recentList"></div>
+    </div>
+
+    <div class="screen" id="screenContacts">
+      <div class="profileHeaderRow">
+        <h1 class="pageTitle" style="margin:0;">Contacts</h1>
+        <button class="miniActionBtn" id="addContactBtn" style="padding:8px 16px;">+ Add</button>
+      </div>
+      <div class="phoneField" style="margin-bottom:14px;"><input id="contactsTabSearch" type="text" placeholder="Search saved contacts" autocomplete="off" /></div>
+      <div id="contactsTabList"></div>
     </div>
 
     <div class="screen" id="screenProfile">
@@ -711,6 +724,28 @@
       </div>
     </div>
 
+    <div id="contactEditor" class="subScreen">
+      <div class="subScreenHeader">
+        <button class="backBtn" id="closeContactEditor" aria-label="Back">
+          <svg viewBox="0 0 24 24" fill="none" width="20" height="20"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="subScreenTitle" id="contactEditorTitle">New contact</div>
+      </div>
+      <div class="subScreenBody">
+        <div class="cLabel" style="margin:0 0 6px 4px;">Name</div>
+        <div class="phoneField" style="margin-bottom:16px;"><input id="contactNameInput" type="text" placeholder="e.g. Amaka" autocomplete="off" maxlength="60" /></div>
+        <div class="cLabel" style="margin:0 0 6px 4px;">WhatsApp number</div>
+        <div class="phoneRow" style="margin-top:0;">
+          <div class="phoneField phoneCC"><span class="phonePlus">+</span><input id="contactCCInput" type="tel" inputmode="numeric" autocomplete="off" maxlength="4" value="234" aria-label="Country code" /></div>
+          <div class="phoneField phoneNum"><input id="contactNumInput" type="tel" inputmode="numeric" placeholder="Phone number" aria-label="Phone number" /></div>
+        </div>
+        <div class="phoneHelp">Country code first (e.g. 234 for Nigeria), then the number without the leading 0.</div>
+        <div id="contactEditorError" style="color:#ff6b6b; font-size:13px; min-height:18px; margin:4px 4px 10px;"></div>
+        <button class="saveKeyBtn" id="contactSaveBtn" style="width:100%; margin:0;">Save contact</button>
+        <button class="saveKeyBtn" id="contactDeleteBtn" style="width:100%; margin:10px 0 0; background:#dc3545; color:#fff; display:none;">Delete contact</button>
+      </div>
+    </div>
+
     <div id="contactPickerModal" class="subScreen">
       <div class="subScreenHeader">
         <button class="backBtn" id="closeContactPicker" aria-label="Back">
@@ -849,6 +884,9 @@
     </button>
     <button class="tabBtn" data-tab="recent" aria-label="Recent">
       <svg viewBox="0 0 24 24" fill="none"><path fill-rule="evenodd" clip-rule="evenodd" d="M22 12c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2s10 4.477 10 10zm-4.581 3.324a1 1 0 0 0-.525-1.313L13 12.341V6.5a1 1 0 0 0-2 0v6.17c0 .6.357 1.143.909 1.379l4.197 1.8a1 1 0 0 0 1.313-.525z" fill="currentColor"/></svg>
+    </button>
+    <button class="tabBtn" data-tab="contacts" aria-label="Contacts">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M8 3h9a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" fill="currentColor" fill-opacity="0.35"/><circle cx="12.5" cy="10" r="2.6" fill="currentColor"/><path d="M7.8 17.2c.6-2 2.5-3.2 4.7-3.2s4.1 1.2 4.7 3.2z" fill="currentColor"/><path d="M3 7h3M3 12h3M3 17h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     </button>
     <button class="tabBtn" data-tab="features" aria-label="Live Swap">
       <svg viewBox="0 0 16 16" fill="none"><path d="m 13.265625 10.476562 l 2.1875 -2.476562 h 0.546875 v 5.003906 h -0.535156 z m -6.265625 -3.476562 h 5 c 0.554688 0 1 0.445312 1 1 v 5 c 0 0.554688 -0.445312 1 -1 1 h -5 c -0.554688 0 -1 -0.445312 -1 -1 v -5 c 0 -0.554688 0.445312 -1 1 -1 z m 0 0" fill="currentColor"></path><path d="m 4 1.996094 c -0.554688 0 -1 0.445312 -1 1 v 5.007812 c 0 0.550782 0.445312 1 1 1 h 0.996094 v -1.003906 c 0 -1.050781 0.953125 -2.007812 2.003906 -2.003906 h 3 v -3 c 0 -0.554688 -0.445312 -1 -1 -1 z m -4 1.007812 v 5.003906 h 0.480469 l 2.253906 -2.585937 l -2.125 -2.417969 z m 0 0" fill="currentColor" fill-opacity="0.55"></path></svg>

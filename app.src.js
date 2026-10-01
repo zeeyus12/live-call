@@ -193,7 +193,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   })();
 
 
-  const screens = { home: $('screenHome'), recent: $('screenRecent'), profile: $('screenProfile'), features: $('screenFeatures') };
+  const screens = { home: $('screenHome'), recent: $('screenRecent'), contacts: $('screenContacts'), profile: $('screenProfile'), features: $('screenFeatures') };
   const tabBtns = document.querySelectorAll('.tabBtn');
   function moveTabGlider(name){
     const glider = $('tabGlider');
@@ -219,6 +219,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     moveTabGlider(name);
     $('homeInputBar').classList.toggle('visible', name === 'home');
     if (name === 'recent') renderRecent();
+    if (name === 'contacts') renderContactsTab();
     if (name === 'profile') { renderProfile(); fetchConnectedStatus(); }
     if (name === 'features') updateLfKeyHint();
   }
@@ -3811,6 +3812,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     // so on the WaCalls engine this list is only populated when the user also
     // has Green API credentials - and calling a typed number directly has
     // always been supported regardless.
+    if (platform === 'whatsapp' && waEngine() === 'wacalls') {
+      allLoadedContacts = savedContactsForPicker();
+      if (!allLoadedContacts.length) {
+        container.innerHTML = '<div style="text-align:center; padding:30px 16px; color:var(--dim); font-size:13.5px; line-height:1.5;">No saved contacts yet.<br>Add them in the Contacts tab, or type a number above to call.</div>';
+      } else {
+        renderContactsList(allLoadedContacts);
+      }
+      return;
+    }
     const endpoint = platform === 'telegram'
       ? (SOCIAL_CALL_API_BASE + '/api/social-call/telegram/contacts')
       : (SOCIAL_CALL_API_BASE + '/api/social-call/whatsapp/contacts');
@@ -3851,7 +3861,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const target = c.phone || c.phone_number || c.username || c.id || c.target;
       const initials = name.trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
       return `
-        <div class="contactRow" data-contact-target="${target}" data-contact-name="${name}">
+        <div class="contactRow" data-contact-target="${String(target).replace(/&/g,'&amp;').replace(/"/g,'&quot;')}" data-contact-name="${String(name).replace(/&/g,'&amp;').replace(/"/g,'&quot;')}">
           <div class="contactAvatar">${initials}</div>
           <div class="contactMain">
             <div class="contactName">${name.replace(/</g,'&lt;')}</div>
@@ -3944,6 +3954,118 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
   $('closeContactPicker')?.addEventListener('click', () => {
     $('contactPickerModal').classList.remove('active');
+  });
+
+  // ---------------------------------------------------------------
+  // Saved contacts (Contacts tab). Stored on this device (localStorage):
+  // { id, name, cc, number, target } where target is the full international
+  // number as digits - exactly what WaCalls wants for a call.
+  // ---------------------------------------------------------------
+  const CONTACTS_KEY = 'lc_saved_contacts_v1';
+  let editingContactId = null;
+  function loadSavedContacts(){
+    try {
+      const list = JSON.parse(localStorage.getItem(CONTACTS_KEY) || '[]');
+      return Array.isArray(list) ? list : [];
+    } catch(e){ return []; }
+  }
+  function storeSavedContacts(list){
+    try { localStorage.setItem(CONTACTS_KEY, JSON.stringify(list)); return true; }
+    catch(e){ return false; }
+  }
+  function savedContactsForPicker(){
+    return loadSavedContacts()
+      .slice().sort((a, b) => a.name.localeCompare(b.name))
+      .map(c => ({ name: c.name, phone: c.target }));
+  }
+  function prettyNumber(c){
+    return '+' + c.cc + ' ' + c.number;
+  }
+  function renderContactsTab(){
+    const box = $('contactsTabList');
+    if (!box) return;
+    const q = ($('contactsTabSearch')?.value || '').trim().toLowerCase();
+    const all = loadSavedContacts().slice().sort((a, b) => a.name.localeCompare(b.name));
+    const list = q ? all.filter(c => c.name.toLowerCase().includes(q) || c.target.includes(q.replace(/\D/g, '') || '\u0000')) : all;
+    box.textContent = '';
+    if (!list.length) {
+      const empty = document.createElement('div');
+      empty.className = 'emptyState';
+      empty.textContent = all.length ? 'No matching contacts.' : 'No contacts yet. Tap + Add to save one, then tap it here to call.';
+      box.appendChild(empty);
+      return;
+    }
+    list.forEach(c => {
+      const row = document.createElement('div');
+      row.className = 'contactRow';
+      const av = document.createElement('div');
+      av.className = 'contactAvatar';
+      av.textContent = c.name.trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
+      const main = document.createElement('div');
+      main.className = 'contactMain';
+      const nm = document.createElement('div');
+      nm.className = 'contactName';
+      nm.textContent = c.name;
+      const sub = document.createElement('div');
+      sub.className = 'contactSub';
+      sub.textContent = prettyNumber(c) + ' · WhatsApp';
+      main.append(nm, sub);
+      const edit = document.createElement('button');
+      edit.className = 'contactEditBtn';
+      edit.setAttribute('aria-label', 'Edit ' + c.name);
+      edit.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+      edit.addEventListener('click', (e) => { e.stopPropagation(); openContactEditor(c.id); });
+      row.append(av, main, edit);
+      // Tapping a saved contact goes straight to Call Preparation.
+      row.addEventListener('click', () => {
+        currentSocialPlatform = 'whatsapp';
+        selectContactForCall({ name: c.name, target: c.target });
+      });
+      box.appendChild(row);
+    });
+  }
+  function openContactEditor(id){
+    editingContactId = id || null;
+    const c = id ? loadSavedContacts().find(x => x.id === id) : null;
+    $('contactEditorTitle').textContent = c ? 'Edit contact' : 'New contact';
+    $('contactNameInput').value = c ? c.name : '';
+    $('contactCCInput').value = c ? c.cc : ($('waPhoneCC')?.value.replace(/\D/g, '') || '234');
+    $('contactNumInput').value = c ? c.number : '';
+    $('contactEditorError').textContent = '';
+    $('contactDeleteBtn').style.display = c ? 'block' : 'none';
+    $('contactEditor').classList.add('active');
+  }
+  $('addContactBtn')?.addEventListener('click', () => openContactEditor(null));
+  $('closeContactEditor')?.addEventListener('click', () => $('contactEditor').classList.remove('active'));
+  $('contactsTabSearch')?.addEventListener('input', renderContactsTab);
+  $('contactSaveBtn')?.addEventListener('click', () => {
+    const err = $('contactEditorError');
+    const name = $('contactNameInput').value.trim();
+    const cc = $('contactCCInput').value.replace(/\D/g, '');
+    const number = $('contactNumInput').value.replace(/\D/g, '').replace(/^0+/, '');
+    if (!name) { err.textContent = 'Enter a name.'; return; }
+    if (!cc) { err.textContent = 'Enter the country code first (e.g. 234).'; return; }
+    if (number.length < 6) { err.textContent = 'Enter the phone number after the country code.'; return; }
+    const target = cc + number;
+    const list = loadSavedContacts();
+    const dupe = list.find(x => x.target === target && x.id !== editingContactId);
+    if (dupe) { err.textContent = 'That number is already saved as "' + dupe.name + '".'; return; }
+    if (editingContactId) {
+      const i = list.findIndex(x => x.id === editingContactId);
+      if (i >= 0) list[i] = { ...list[i], name, cc, number, target };
+    } else {
+      list.push({ id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name, cc, number, target });
+    }
+    if (!storeSavedContacts(list)) { err.textContent = 'Could not save on this device (storage is blocked or full).'; return; }
+    $('contactEditor').classList.remove('active');
+    renderContactsTab();
+  });
+  $('contactDeleteBtn')?.addEventListener('click', () => {
+    if (!editingContactId) return;
+    if (!confirm('Delete this contact?')) return;
+    storeSavedContacts(loadSavedContacts().filter(x => x.id !== editingContactId));
+    $('contactEditor').classList.remove('active');
+    renderContactsTab();
   });
 
   // Call Preparation
