@@ -1319,6 +1319,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // text still goes to lfDebug() (console + hidden log) for our own diagnosis.
   function lfFriendlyError(raw){
     const s = String(raw || '').toLowerCase();
+    if (s.includes('concurrency') || s.includes('concurrent')) return 'Another live session is still open on your account (your plan allows only one at a time). Close it or wait a minute, then try again.';
     if (s.includes('credit') || s.includes('balance') || s.includes('quota') || s.includes('402') || s.includes('payment')) return 'Your Decart account is out of credits. Top up at platform.decart.ai, then try again.';
     if (s.includes('429') || s.includes('rate limit') || s.includes('too many')) return 'Too many sessions at once — wait a moment and try again.';
     if (s.includes('capacity') || s.includes('busy')) return 'Servers are busy right now — please try again in a moment.';
@@ -3596,16 +3597,24 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       platformPillEl.className = 'pill whatsapp';
     }
     $('socialCallStatusLabel').textContent = status || 'Connected';
+    clearInterval(socialCallDurationTimer);
+    socialCallDurationTimer = null;
+    // WaCalls: the clock starts when the other person actually picks up, not
+    // while it is still starting up / ringing.
+    if (currentCallEngine === 'wacalls') { $('socialCallTimer').textContent = '--:--'; }
+    else startSocialCallTimer();
+    syncAvatarSourceUi();
+  }
+  function startSocialCallTimer(){
+    if (socialCallDurationTimer) return;
     $('socialCallTimer').textContent = '00:00';
     socialCallStartedAt = Date.now();
-    clearInterval(socialCallDurationTimer);
     socialCallDurationTimer = setInterval(() => {
       const sec = Math.floor((Date.now() - socialCallStartedAt) / 1000);
       const m = String(Math.floor(sec / 60)).padStart(2, '0');
       const s = String(sec % 60).padStart(2, '0');
       $('socialCallTimer').textContent = `${m}:${s}`;
     }, 1000);
-    syncAvatarSourceUi();
   }
 
   // -------------------------------------------------------------
@@ -3678,6 +3687,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         // ringing phone. Only the real call-status "connected" counts.
         if (evt.subtype === 'webrtc') return;
         if (evt.subtype !== 'unheld') fireCallAnswered();
+        startSocialCallTimer();
         if (lbl) lbl.textContent = 'Connected';
         $('socialCallIdle') && ($('socialCallIdle').style.display = 'none');
         stopRingback();
@@ -4945,6 +4955,18 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     const f = onCallAnswered; onCallAnswered = null;
     try { f(); } catch(e) { console.warn('[call] answered-hook failed:', e.message); }
   }
+  // ---- plan / concurrency limits ------------------------------------------
+  function isPlanLimitError(e){
+    return /concurrency|concurrent|upgrade your plan|plan limit|limit reached|quota|insufficient (credits|minutes)|out of (credits|minutes)/i.test(String((e && e.message) || e || ''));
+  }
+  function planLimitMessage(e){
+    const raw = String((e && e.message) || e || '').slice(0, 120);
+    const who = selectedCallSource === 'avatar' ? 'Anam' : 'Decart/Fal';
+    return `${who} refused to start a session: "${raw}". This is the number of sessions open at the same time, not your minutes - `
+      + `the plan allows only one, and another is still open (an earlier call that has not timed out yet, another tab or device, or the ${who} dashboard playground). `
+      + `Close it or wait a minute, then try again.`;
+  }
+
   // ---- avatar dropped mid-call --------------------------------------------
   let avatarRecoveries = 0, avatarRecovering = false;
   function anamCloseReason(code, details){
@@ -5056,6 +5078,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
         } catch (firstErr) {
           if (cancelled()) return;
+          // A plan limit is not a glitch: retrying only opens a second session
+          // attempt and fails the same way. Say what it is and stop.
+          if (isPlanLimitError(firstErr)) {
+            try { activeSocialSource().stop(); } catch(e){}
+            throw new Error(planLimitMessage(firstErr));
+          }
           console.warn('[avatar] first start failed, retrying once:', firstErr && firstErr.message);
           try { activeSocialSource().stop(); } catch(e){}
           await new Promise(r => setTimeout(r, 600));
@@ -5069,11 +5097,25 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           else console.warn('[WaCalls] the avatar produced no audio track - the callee will not hear it');
         }
       };
-      // The avatar is up and ready BEFORE the call is placed, so it is already
-      // there when the callee picks up (it stays silent until they speak - the
-      // persona is created with skipGreeting).
-      await startAvatar();
+      // The avatar gets a head start so it is normally up BEFORE the callee
+      // picks up (it stays silent until they speak - skipGreeting). If it fails
+      // within the grace period (plan limit, bad key...) nothing is dialled and
+      // the real reason is shown. If it is just slow, the phone rings anyway and
+      // the avatar attaches as soon as it is ready - waiting on it used to mean
+      // no ring at all for as long as it took (or until it failed).
+      const avatarPromise = startAvatar();
+      avatarPromise.catch(() => {}); // handled below
+      let avatarState = 'pending';
+      await Promise.race([
+        avatarPromise.then(() => { avatarState = 'ready'; }), // a rejection throws -> caught below, nothing placed
+        new Promise((r) => setTimeout(r, 8000)),
+      ]);
       if (cancelled()) return;
+      if (avatarState === 'pending') {
+        avatarPromise.then(() => {}, (e) => {
+          if (!cancelled()) showCallFailureAndEnd('Avatar failed: ' + (e && e.message || e));
+        });
+      }
 
       setStatus('Calling…');
       // Place call on backend bridge
@@ -5162,7 +5204,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       try { CalleeAudioBus.stop(); } catch(e){}
       currentCallEngine = null;
       callAttemptSeq++;
-      clearInterval(socialCallDurationTimer);
+      clearInterval(socialCallDurationTimer); socialCallDurationTimer = null;
       stopRingback();
       if (callScreenShown) {
         $('socialCallScreen').classList.remove('active');
@@ -5286,7 +5328,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
   async function endSocialCall(){
     callAttemptSeq++; // cancels a placeSocialCall() that is still setting up
-    clearInterval(socialCallDurationTimer);
+    clearInterval(socialCallDurationTimer); socialCallDurationTimer = null;
     stopRingback();
     // Only the engine that carried THIS call is torn down: Green API's browser
     // client hangs up client-side, WaCalls ends the call server-side through
@@ -5328,6 +5370,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     renderRecent();
     if (lastEndReason) { showEndToast(lastEndReason); lastEndReason = ''; }
   }
+
+  // Closing/reloading the page mid-call must not leave a live avatar session
+  // behind: on a plan with one concurrent session that blocks the next call.
+  window.addEventListener('pagehide', () => {
+    try { SocialAnamSource.stop(); } catch(e){}
+    try { if (anamClient) anamClient.stopStreaming(); } catch(e){}
+  });
 
   // Initial fetch of connected account statuses, and make both avatar-source
   // selectors agree with the stored/default choice before anything is shown.
