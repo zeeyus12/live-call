@@ -25,4 +25,8 @@ assert.ok(html.includes('id="telegramAccountBadge">Coming soon') && html.include
 assert.ok(!app.includes('@anam-ai/js-sdk@latest'));
 assert.equal((app.match(/@anam-ai\/js-sdk@4\.27\.1/g) || []).length, 1);
 assert.ok(app.includes('mintAnamSession') && app.includes("loadAnamSdk().catch"));
+// Regression: Decart's model.fps is ALREADY a constraint object ({ideal,max}).
+// Wrapping it as { ideal: model.fps } made WebKit throw "The provided value is non-finite".
+assert.ok(!/frameRate:\s*\{\s*ideal:\s*model\.fps\s*\}/.test(app), 'do not wrap model.fps in another { ideal }');
+assert.ok(app.includes("typeof model.fps === 'number'"));
 console.log('provider-wiring: all checks passed');

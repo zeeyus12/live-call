@@ -1398,6 +1398,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // Auto-describe the photo so the person never has to type a prompt -
       // Decart's docs say resemblance is weak without a literal description
       // of the reference in the prompt text, so we build that automatically.
+      if (lucyProvider() === 'decart') {
+        // Decart takes the reference photo itself; the text description is only
+        // used by the Fal path, so don't make an extra call that can only fail.
+        statusEl.textContent = 'Reference photo ready';
+        return;
+      }
       statusEl.textContent = 'Analyzing photo…';
       try {
         const dr = await fetch('/api/describe-reference', {
@@ -1647,7 +1653,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // Use the model's own fps/size so Decart doesn't have to rescale.
       if (lfLocalStream) { lfLocalStream.getTracks().forEach(t => t.stop()); lfLocalStream = null; }
       lfLocalStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', frameRate: { ideal: model.fps }, width: { ideal: model.width }, height: { ideal: model.height } },
+        // model.fps is already a constraint object ({ ideal: 30, max: 30 }) in the
+        // Decart SDK - wrapping it again made the browser reject the request with
+        // "The provided value is non-finite". Accept either shape.
+        video: {
+          facingMode: 'user',
+          frameRate: (typeof model.fps === 'number') ? { ideal: model.fps } : (model.fps || { ideal: 30 }),
+          width: { ideal: Number(model.width) || 1088 },
+          height: { ideal: Number(model.height) || 624 },
+        },
       });
       const selfVid = $('socialSelfVideo');
       if (selfVid) selfVid.srcObject = lfLocalStream;

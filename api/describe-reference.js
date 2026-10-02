@@ -32,9 +32,16 @@ STRICT RULES - precision matters more than detail:
 - Output ONLY the description clause itself (lowercase start, no leading "a photo of" or "the image shows"), 1-2 sentences, in this exact style:
 "a young person wearing a short-sleeved pink top with white ribbon ties on the back, loose pink pants, and short brown hair tied in a side ponytail."`;
 
-  // Models change often on Groq; try the configured one first (GROQ_VISION_MODEL),
-  // then known vision-capable fallbacks, and report every reason if all fail.
-  const models = [process.env.GROQ_VISION_MODEL, 'qwen/qwen3.6-27b', 'meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'].filter(Boolean);
+  // Groq retires models often, so never rely on one hard-coded name: ask Groq
+  // which models exist right now and try the vision-capable ones. An explicit
+  // GROQ_VISION_MODEL env var still goes first if you set one.
+  let live = [];
+  try {
+    const lr = await fetch('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${apiKey}` } });
+    const ld = await lr.json().catch(() => ({}));
+    live = (ld.data || []).map((m) => m.id).filter((id) => /llama-4|scout|maverick|vision|[-_]vl\b|qwen.*vl/i.test(id));
+  } catch (e) { /* fall through to the static list */ }
+  const models = [process.env.GROQ_VISION_MODEL, ...live, 'meta-llama/llama-4-scout-17b-16e-instruct'].filter(Boolean);
   const failures = [];
   try {
     for (const model of [...new Set(models)]) {
