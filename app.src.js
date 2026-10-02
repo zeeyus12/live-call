@@ -2067,10 +2067,19 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         const remoteVid = $('socialRemoteVideo');
         if (remoteVid && vid.srcObject) remoteVid.srcObject = vid.srcObject;
       });
-      client.addListener(AnamEvent.CONNECTION_CLOSED, () => {
+      client.addListener(AnamEvent.CONNECTION_CLOSED, (code, details) => {
         if (this.client === client) this.client = null;
-        if (!stale() && $('socialCallScreen')?.classList.contains('active')) endSocialCall();
+        if (stale()) return;
+        const why = anamCloseReason(code, details);
+        console.warn('[avatar] Anam connection closed:', code, details || '');
+        if (!$('socialCallScreen')?.classList.contains('active')) return;
+        // On a WhatsApp call the avatar is just one half of it: losing the avatar
+        // used to hang up the whole call with no explanation. Say why and try to
+        // bring the avatar back once instead.
+        if (calleeStream && WaCallsMediaLeg.active) { recoverAvatar(why); return; }
+        endSocialCall();
       });
+      try { client.addListener(AnamEvent.SERVER_WARNING, (m) => console.warn('[avatar] Anam server warning:', m)); } catch(_){}
       await client.streamToVideoElement('prepAvatarPreview', calleeStream || undefined);
       if (stale()) { try { client.stopStreaming(); } catch(e){} return; }
 
@@ -2840,6 +2849,21 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (this.active && stream) this.startAudio(false, stream);
     },
 
+    // Digital silence at 16 kHz, 20 ms at a time, until the avatar's voice is
+    // attached (see encodeFrame for why something must flow from the start).
+    silenceTimer: null,
+    startSilence(){
+      if (this.silenceTimer) return;
+      const frame = new Uint8Array(320 * 2); // 320 samples of 16-bit zero
+      this.silenceTimer = setInterval(() => {
+        if (!this.active || !this.pcmDC || this.pcmDC.readyState !== 'open') return;
+        this.pcmSend(frame);
+      }, 20);
+    },
+    stopSilence(){
+      if (this.silenceTimer) { clearInterval(this.silenceTimer); this.silenceTimer = null; }
+    },
+
     async open({ callId, video = true, source = 'lucy', voiceConversion = false } = {}){
       const keepOut = this.outStream;
       if (this.active) this.close();
@@ -2885,6 +2909,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         if (this.source === 'anam') {
           // No microphone in avatar mode: wait for the avatar's own voice.
           if (this.outStream) this.startAudio(false, this.outStream);
+          else this.startSilence(); // replaced by the avatar's voice once it is attached
         } else {
           this.startAudio(voiceConversion);
         }
@@ -2941,6 +2966,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         console.warn('[WaCalls] no microphone stream available for the call audio');
         return;
       }
+      this.stopSilence();
       try {
         const AudioCtx = window.AudioContext || window.webkitAudioContext;
         this.micCtx = new AudioCtx({ sampleRate: 16000 });
@@ -3036,11 +3062,22 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (!this.active || !this.encoder || this.encoder.state !== 'configured') return;
       if (!this.videoDC || this.videoDC.readyState !== 'open') return;
       const vid = this.avatarSource().getVideoElement() || $('socialRemoteVideo');
-      if (!vid || !(vid.videoWidth || vid.readyState >= 2)) return;
-      try {
-        this.ctx.drawImage(vid, 0, 0, this.canvas.width, this.canvas.height);
-      } catch (e) {
-        return; // frame not decoded yet / cross-origin - try the next tick
+      const avatarLive = !!(vid && (vid.videoWidth || vid.readyState >= 2));
+      if (!avatarLive) {
+        // The avatar takes several seconds to start (it only starts once the
+        // callee answers). Until it produces frames, send a plain dark frame so
+        // the callee's phone gets video immediately; with nothing arriving,
+        // WhatsApp can sit on "connecting" and then drop the call.
+        try {
+          this.ctx.fillStyle = '#101010';
+          this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        } catch (e) { return; }
+      } else {
+        try {
+          this.ctx.drawImage(vid, 0, 0, this.canvas.width, this.canvas.height);
+        } catch (e) {
+          return; // frame not decoded yet / cross-origin - try the next tick
+        }
       }
       const ts = Math.round(performance.now() * 1000); // microseconds
       let frame;
@@ -3109,6 +3146,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const sent = { ...this.sent };
       const received = { ...this.received };
       this.active = false;
+      this.stopSilence();
       clearInterval(this.encodeTimer);
       this.encodeTimer = null;
       if (this.encoder) { try { this.encoder.close(); } catch (e) {} this.encoder = null; }
@@ -3449,6 +3487,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     selectedSocialContact = { name: call.peer, target: call.peer };
 
     const avatarAnswer = selectedCallSource === 'avatar';
+    avatarRecoveries = 0; avatarRecovering = false;
     if (avatarAnswer) {
       CalleeAudioBus.start(); // the avatar listens to the caller; no microphone is opened
     } else if (!socialMicStream) {
@@ -4874,6 +4913,41 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     const f = onCallAnswered; onCallAnswered = null;
     try { f(); } catch(e) { console.warn('[call] answered-hook failed:', e.message); }
   }
+  // ---- avatar dropped mid-call --------------------------------------------
+  let avatarRecoveries = 0, avatarRecovering = false;
+  function anamCloseReason(code, details){
+    const c = String(code || '').replace('CONNECTION_CLOSED_CODE_', '');
+    const names = {
+      NORMAL: 'session ended',
+      MICROPHONE_PERMISSION_DENIED: 'audio input was refused',
+      SIGNALLING_CLIENT_CONNECTION_FAILURE: 'could not reach Anam',
+      WEBRTC_FAILURE: 'network connection to Anam failed',
+      SERVER_CLOSED_CONNECTION: 'Anam ended the session',
+    };
+    const base = names[c] || c || 'unknown';
+    const extra = details ? ' — ' + String(details).replace(/\s+/g, ' ').slice(0, 90) : '';
+    return base + extra;
+  }
+  async function recoverAvatar(why){
+    if (avatarRecovering) return;
+    const setLbl = (t) => { const l = $('socialCallStatusLabel'); if (l) l.textContent = t; };
+    if (avatarRecoveries >= 1) { showCallFailureAndEnd('Avatar disconnected: ' + why); return; }
+    avatarRecoveries++; avatarRecovering = true;
+    setLbl('Avatar disconnected (' + why + ') — reconnecting…');
+    try {
+      try { SocialAnamSource.stop(); } catch(e){}
+      await new Promise(r => setTimeout(r, 800));
+      if (!$('socialCallScreen')?.classList.contains('active')) return;
+      await withTimeout(SocialAnamSource.start(), 30000, 'Restarting the avatar');
+      const voice = await waitForAvatarAudio(8000);
+      if (voice) WaCallsMediaLeg.attachOutgoingAudio(voice);
+      setLbl('Connected');
+    } catch(e) {
+      showCallFailureAndEnd('Avatar disconnected: ' + why + ' — restart failed: ' + (e && e.message || e));
+    } finally {
+      avatarRecovering = false;
+    }
+  }
   async function waitForAvatarAudio(ms){
     const until = Date.now() + ms;
     while (Date.now() < until) {
@@ -4899,6 +4973,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     $('prepErrorHint').textContent = '';
 
     const attempt = ++callAttemptSeq;
+    avatarRecoveries = 0; avatarRecovering = false;
     const cancelled = () => attempt !== callAttemptSeq;
     const setStatus = (text) => { const l = $('socialCallStatusLabel'); if (l && !cancelled()) l.textContent = text; };
     let callScreenShown = false;

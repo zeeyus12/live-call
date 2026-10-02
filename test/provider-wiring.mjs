@@ -29,4 +29,9 @@ assert.ok(app.includes('mintAnamSession') && app.includes("loadAnamSdk().catch")
 // Wrapping it as { ideal: model.fps } made WebKit throw "The provided value is non-finite".
 assert.ok(!/frameRate:\s*\{\s*ideal:\s*model\.fps\s*\}/.test(app), 'do not wrap model.fps in another { ideal }');
 assert.ok(app.includes("typeof model.fps === 'number'"));
+// Avatar calls: an Anam disconnect must not silently hang up the WhatsApp call,
+// and media must flow before the avatar is up.
+assert.ok(app.includes('recoverAvatar(why)') && app.includes('anamCloseReason'));
+assert.ok(!/CONNECTION_CLOSED, \(\) => \{[^}]*endSocialCall\(\);\s*\}\);/.test(app), 'Anam close handler must not unconditionally end the call');
+assert.ok(app.includes('startSilence()') && app.includes("this.ctx.fillStyle = '#101010'"));
 console.log('provider-wiring: all checks passed');
