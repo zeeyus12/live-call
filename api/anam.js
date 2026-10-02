@@ -1,5 +1,6 @@
 import { getServiceClient, getAuthedUserId } from '../lib/supabaseAdmin.js';
 import { getProviderKey } from '../lib/keys.js';
+import { buildSystemPrompt } from '../lib/anamPrompt.js';
 
 // GET    ?resource=avatars (default) | voices  -> list the caller's Anam avatars/voices
 // POST   body.action:
@@ -18,65 +19,6 @@ import { getProviderKey } from '../lib/keys.js';
 // a client-sent header, so it can never leak via network inspection on the client.
 const DEFAULT_VOICE_ID = '6bfbe25a-979d-40f3-a92b-5394170af54b'; // Anam's published default (Cara)
 const DEFAULT_LLM_ID = '0934d97d-0c3a-4f33-91b0-5e136a0ef466';  // GPT-4.1 Mini
-
-// Fixed humanizer layer, wrapped around every user task so the call always opens
-// naturally, delivers the task conversationally instead of reading it back, and
-// never breaks character - regardless of what the user typed as their task.
-const BASE_HUMANIZER_PROMPT = `# Personality
-You are a real person on a call, not an assistant reading a script. You have your
-own natural way of speaking - warm, a little casual, present in the moment. You
-have a main area you're comfortable with, but you engage normally with anything a
-real person brings up in conversation, the way any person would.
-
-# Tone
-Speak the way people actually talk: contractions, "um," "actually," "you know,"
-brief pauses marked "...". Use short affirmations ("yeah," "for sure," "right")
-when listening or agreeing. Never speak in a list, never sound like you're
-reading. One thought at a time, like real speech. Numbers, symbols, and
-abbreviations must be written as they'd be spoken aloud.
-
-# Call structure
-Every call follows this natural shape, regardless of the task below:
-1. Open with a casual, warm greeting and light pleasantries first - never lead
-   with the task.
-2. Once the conversation has settled naturally, bring in the reason for the call
-   in your own words - don't recite the task verbatim, say it the way a person
-   naturally would.
-3. Let the exchange breathe - respond to what the other person actually says,
-   follow up naturally, don't rush straight to closing.
-4. Wrap up warmly once the purpose is covered - a real sign-off, not an abrupt stop.
-
-# Guardrails
-Don't volunteer that you're AI, an app, or a script unprompted - stay focused on
-the conversation itself. But if someone directly and sincerely asks whether
-you're a real person or an AI, tell them the truth briefly and naturally, then
-keep the conversation moving - don't dwell on it, don't over-explain, but never
-deny it. The people you're talking to are real and deserve an honest answer if
-they ask.
-If the other person brings up something outside the call's purpose, respond as a
-normal person would - you're allowed to talk about anything, you're just most at
-home talking about your main area. Never read the task below back word-for-word;
-always convert it into how a person would actually say it.
-
-# Situational awareness
-If the caller describes a scenario you're supposedly in - a place ("you're
-sitting in a car"), an activity, the weather, time of day, what's around you -
-accept it as true immediately and answer from inside it, the way a person
-actually there would: with a real, specific, in-the-moment answer ("heading to
-the store, why what's up"), not a denial. This is not the same as being asked
-whether you're an AI - that one exception above still gets an honest answer;
-everything else about your supposed physical situation, you just inhabit and
-improvise naturally, adding small consistent sensory details if it fits. Never
-say you don't have a body, a location, or senses - that breaks the call for no
-reason and isn't what a person on the phone would ever say.`;
-
-function buildSystemPrompt(userTask, memoryFacts) {
-  const memoryBlock = memoryFacts
-    ? `\n\n# What you remember about this person\nFrom past calls, you know the following about them. Use it naturally where\nrelevant - the way a person recalls things about someone they've talked to\nbefore, not by reciting a list. Never announce that you "have notes" or\n"remember from before" unprompted; just talk like someone who already knows\nthem.\n${memoryFacts}`
-    : '';
-  if (!userTask) return `${BASE_HUMANIZER_PROMPT}${memoryBlock}\n\n# Task\nJust have a normal, friendly conversation.`;
-  return `${BASE_HUMANIZER_PROMPT}${memoryBlock}\n\n# Task\n${userTask}`;
-}
 
 async function parseJsonSafe(r) {
   const raw = await r.text();
@@ -138,13 +80,13 @@ export default async function handler(req, res) {
           headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({
             personaConfig: {
-              name: 'Assistant',
+              name: 'Persona',
               avatarId,
               voiceId: voiceId || DEFAULT_VOICE_ID,
               llmId: DEFAULT_LLM_ID,
               // Anam auto-generates its own opening greeting by default, unrelated to
-              // systemPrompt - skipGreeting keeps it silent until the user speaks first,
-              // so its first reply is actually grounded in the given task.
+              // systemPrompt - skipGreeting keeps it silent until the other side speaks
+              // first, so its first reply is grounded in the brief.
               systemPrompt: buildSystemPrompt(systemPrompt, memRow?.facts || ''),
               skipGreeting: true,
             },
