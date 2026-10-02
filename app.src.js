@@ -333,6 +333,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     anamKeySet: false,
     anamKeyLocked: false,
     falKeySet: false,
+    decartKeySet: false,
   };
   let currentUser = null;
   let currentChatId = null;
@@ -369,6 +370,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (!r.ok) return;
       state.anamKeySet = !!data.anam;
       state.falKeySet = !!data.fal;
+      state.decartKeySet = !!data.decart;
       state.anamKeyLocked = !!data.anamKeyLocked;
     } catch (e) { /* leave as false - UI just shows "paste your key" */ }
     if (state.anamKeyLocked) {
@@ -381,6 +383,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       $('saveAnamKey').disabled = false;
     }
     $('falApiKey').placeholder = state.falKeySet ? 'Key saved — enter a new one to replace' : 'Paste your Fal API key';
+    $('decartApiKey').placeholder = state.decartKeySet ? 'Key saved — enter a new one to replace' : 'Paste your Decart API key';
+    const lps = $('lucyProviderSelect'); if (lps) lps.value = lucyProvider();
   }
 
   async function loadSettings(){
@@ -557,6 +561,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   }
   $('saveAnamKey')?.addEventListener('click', () => saveProviderKey('anam', 'anamApiKey', 'saveAnamKey', () => { loadAnamAvatars(); loadAnamVoices(); }));
   $('saveFalKey')?.addEventListener('click', () => saveProviderKey('fal', 'falApiKey', 'saveFalKey', () => updateLfKeyHint()));
+  $('saveDecartKey')?.addEventListener('click', () => saveProviderKey('decart', 'decartApiKey', 'saveDecartKey', () => updateLfKeyHint()));
+  $('lucyProviderSelect')?.addEventListener('change', (e) => { try { localStorage.setItem('lucyProvider', e.target.value); } catch(_){} updateLfKeyHint(); });
   $('saveGreenapiKey')?.addEventListener('click', () => saveProviderKey('greenapi', 'greenapiApiKey', 'saveGreenapiKey'));
   document.querySelectorAll('.eyeToggle').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1086,6 +1092,34 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
   const callScreen = $('callScreen'), callIdle = $('callIdle'), callStatus = $('callStatus'), callBottom = $('callBottom');
   const remoteVideo = $('remoteVideo'), liveDot = $('liveDot');
+  // Pinned (not @latest) so a CDN re-resolve can't slow or break call start, and
+  // preloadable: kicked off while the phone is still ringing.
+  let _anamSdkPromise = null;
+  function loadAnamSdk(){
+    if (!_anamSdkPromise) {
+      _anamSdkPromise = import('https://esm.sh/@anam-ai/js-sdk@4.27.1').catch((e) => { _anamSdkPromise = null; throw e; });
+    }
+    return _anamSdkPromise;
+  }
+  // Mints an Anam session token; retries once on a network error or 5xx/429.
+  async function mintAnamSession(){
+    let lastErr;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const resp = await fetch('/api/anam', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+          body: JSON.stringify({ action: 'session', avatarId: state.anamAvatarId, voiceId: state.anamVoiceId, systemPrompt: promptWithLanguage() }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) return data;
+        lastErr = new Error('Anam error: ' + JSON.stringify(data.error));
+        if (resp.status < 500 && resp.status !== 429) throw lastErr;
+      } catch (e) { lastErr = e; if (/^Anam error/.test(e.message) && attempt === 1) throw e; }
+      await new Promise(r => setTimeout(r, 800));
+    }
+    throw lastErr;
+  }
   let anamClient = null, micStream = null, audioCtx = null, callStartedAt = null, callStarting = false;
 
   function primeAudioSession(){
@@ -1180,7 +1214,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     const data = await resp.json();
     if (!resp.ok) { callStatus.textContent = 'Anam error: ' + JSON.stringify(data.error); return; }
 
-    const { createClient, AnamEvent } = await import('https://esm.sh/@anam-ai/js-sdk@latest');
+    const { createClient, AnamEvent } = await loadAnamSdk();
     anamClient = createClient(data.sessionToken);
 
     remoteVideo.muted = false;
@@ -1307,9 +1341,21 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   }
   $('lfRetryBtn')?.addEventListener('click', () => { lfClearError(); startLiveFilter(); });
 
+  // Which realtime face-swap backend to use: the saved choice if its key exists,
+  // otherwise whichever key the user has (Fal first).
+  function lucyProvider(){
+    let pref = 'fal';
+    try { pref = localStorage.getItem('lucyProvider') || 'fal'; } catch(_){}
+    if (pref === 'decart' && state.decartKeySet) return 'decart';
+    if (pref === 'fal' && state.falKeySet) return 'fal';
+    if (state.falKeySet) return 'fal';
+    if (state.decartKeySet) return 'decart';
+    return pref === 'decart' ? 'decart' : 'fal';
+  }
+  const lucyKeySet = () => state.falKeySet || state.decartKeySet;
   function updateLfKeyHint(){
-    $('lfKeyHint').style.display = state.falKeySet ? 'none' : 'block';
-    $('lfStartBtn').disabled = !state.falKeySet;
+    $('lfKeyHint').style.display = lucyKeySet() ? 'none' : 'block';
+    $('lfStartBtn').disabled = !lucyKeySet();
   }
 
   $('openLfImageUpload')?.addEventListener('click', () => $('lfImageInput').click());
@@ -1569,10 +1615,81 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     return token;
   }
 
+  // ---- Decart native realtime (lucy-latest). Uses a short-lived client token minted by
+  // /api/fal-realtime-token {provider:'decart'} from the user's OWN Decart key.
+  let lfDecart = null;
+  async function startDecartLive(prompt){
+    try {
+      lfStatus.textContent = 'Connecting…';
+      const tr = await fetch('/api/fal-realtime-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body: JSON.stringify({ provider: 'decart' }),
+      });
+      const tk = await tr.json().catch(() => ({}));
+      if (!tr.ok || !tk.apiKey) throw new Error(tk.error || `Decart token request failed (${tr.status})`);
+
+      const { createDecartClient, models } = await import('https://esm.sh/@decartai/sdk@0.2.4');
+      const model = models.realtime('lucy-latest');
+      // Use the model's own fps/size so Decart doesn't have to rescale.
+      if (lfLocalStream) { lfLocalStream.getTracks().forEach(t => t.stop()); lfLocalStream = null; }
+      lfLocalStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', frameRate: { ideal: model.fps }, width: { ideal: model.width }, height: { ideal: model.height } },
+      });
+      const selfVid = $('socialSelfVideo');
+      if (selfVid) selfVid.srcObject = lfLocalStream;
+
+      const hasRef = !!lfReferenceImageUrl;
+      const initialState = {};
+      if (hasRef) {
+        initialState.image = lfReferenceImageUrl;
+        initialState.prompt = { text: 'Substitute the character in the video with the person in the reference image.', enhance: false };
+      } else if (prompt) {
+        initialState.prompt = { text: prompt, enhance: true };
+      }
+
+      const client = createDecartClient({ apiKey: tk.apiKey });
+      lfStatus.textContent = 'Opening connection…';
+      lfDecart = await client.realtime.connect(lfLocalStream, {
+        model,
+        onRemoteStream: (stream) => {
+          lfRemoteVideo.srcObject = stream;
+          LiveSwapMediaSource.setStream(stream);
+          const socialVid = $('socialRemoteVideo');
+          if (socialVid) { socialVid.srcObject = stream; socialVid.style.display = 'block'; }
+          const prepVid = $('prepAvatarPreview');
+          if (prepVid) {
+            prepVid.srcObject = stream;
+            prepVid.style.display = 'block';
+            const ph = $('prepAvatarPlaceholder'); if (ph) ph.style.display = 'none';
+          }
+          if (!LiveSwapMediaSource.forSocialCall) {
+            lfRemoteVideo.style.display = 'block';
+            lfIdle.style.display = 'none';
+            lfLiveDot.classList.add('live');
+            lfBottom.classList.remove('hidden');
+          } else {
+            const idle = $('socialCallIdle'); if (idle) idle.style.display = 'none';
+            const lucySt = $('prepLucyStatus'); if (lucySt) lucySt.textContent = 'Live & Streaming';
+            $('prepLucyDot')?.classList.add('live');
+          }
+        },
+        initialState: Object.keys(initialState).length ? initialState : undefined,
+      });
+      if (typeof lfDecart.on === 'function') {
+        try { lfDecart.on('error', (e) => { lfDebug('decart error: ' + (e && e.message || e)); lfShowError((e && e.message) || 'Decart error'); }); } catch(_){}
+      }
+      lfDebug('decart realtime connected');
+    } catch (e) {
+      lfDebug('decart failed: ' + (e && e.message || e));
+      lfShowError((e && e.message) || String(e));
+    }
+  }
+
   async function startLiveFilter(retryCount, { forSocialCall = false } = {}){
     retryCount = retryCount || 0;
     LiveSwapMediaSource.forSocialCall = !!forSocialCall;
-    if (!state.falKeySet) {
+    if (!lucyKeySet()) {
       if (forSocialCall) {
         // Fallback for social call if Fal key is not configured: activate user camera for the call
         try {
@@ -1639,6 +1756,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (socialSelfVid) { socialSelfVid.srcObject = lfLocalStream; }
     } catch (e) {
       lfShowError('camera permission');
+      return;
+    }
+
+    // Decart (native SDK) path: its own signaling + WebRTC, returns the transformed stream directly.
+    if (lucyProvider() === 'decart') {
+      await startDecartLive(prompt);
       return;
     }
 
@@ -1725,6 +1848,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     lfClearConnectTimer();
     if (lfPc) { try { lfPc.close(); } catch(e){} lfPc = null; }
     if (lfConnection) { try { lfConnection.close ? lfConnection.close() : lfConnection.send({ close: true }); } catch(e){} lfConnection = null; }
+    if (lfDecart) { try { lfDecart.disconnect(); } catch(e){} lfDecart = null; }
     if (lfLocalStream) { lfLocalStream.getTracks().forEach(t => t.stop()); lfLocalStream = null; }
     lfRemoteVideo.srcObject = null;
     lfRemoteVideo.style.display = 'none';
@@ -1866,16 +1990,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       this.videoEl = vid;
       if (!state.anamKeySet) throw new Error('Add your Anam API key in Profile settings first.');
       if (!state.anamAvatarId) throw new Error('Pick an avatar first.');
-      const resp = await fetch('/api/anam', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
-        body: JSON.stringify({ action: 'session', avatarId: state.anamAvatarId, voiceId: state.anamVoiceId, systemPrompt: promptWithLanguage() }),
-      });
-      const data = await resp.json();
+      const data = await mintAnamSession();
       if (stale()) return;
-      if (!resp.ok) throw new Error('Anam error: ' + JSON.stringify(data.error));
 
-      const { createClient, AnamEvent } = await import('https://esm.sh/@anam-ai/js-sdk@latest');
+      const { createClient, AnamEvent } = await loadAnamSdk();
       if (stale()) return;
       const client = createClient(data.sessionToken);
       this.client = client;
@@ -3633,7 +3751,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       }
 
       // Telegram status
-      const tg = data.telegram || {};
+      const tg = {}; // Telegram: coming soon, ignore bridge status
       const tgStatusEl = $('telegramAccountStatus');
       const tgBadgeEl = $('telegramAccountBadge');
       if (tg.connected && tg.user) {
@@ -3651,16 +3769,16 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         $('tgConnectedView').style.display = 'block';
         $('choiceTelegramSubtitle').textContent = `Connected (${disp})`;
       } else {
-        if (tgStatusEl) tgStatusEl.textContent = 'Not connected';
+        if (tgStatusEl) tgStatusEl.textContent = 'Coming soon';
         if (tgBadgeEl) {
-          tgBadgeEl.textContent = 'Connect';
+          tgBadgeEl.textContent = 'Coming soon';
           tgBadgeEl.classList.remove('connected');
         }
         $('tgDetailStatus').textContent = 'Disconnected';
         $('tgDetailSub').textContent = 'Enter phone number to receive login code';
         $('tgNotConnectedView').style.display = 'block';
         $('tgConnectedView').style.display = 'none';
-        $('choiceTelegramSubtitle').textContent = 'Live Video Call with Lucy 2.5';
+        $('choiceTelegramSubtitle').textContent = 'Coming soon';
       }
     } catch(err){
       console.warn('[fetchConnectedStatus] note:', err.message);
@@ -3744,6 +3862,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
   // Profile -> Telegram
   $('openTelegramConnect')?.addEventListener('click', () => {
+    return; // Telegram: coming soon
     $('telegramConnectScreen').classList.add('active');
     fetchConnectedStatus();
     fetchP2pStatus();
@@ -3953,6 +4072,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   });
 
   $('chooseTelegramCallBtn')?.addEventListener('click', () => {
+    return; // Telegram: coming soon
     $('callChoiceModal').classList.remove('active');
     openContactPicker('telegram');
   });
@@ -4307,7 +4427,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       $('prepEnableMicBtn').style.display = 'inline-block';
     }
 
-    $('prepLucyStatus').textContent = state.falKeySet ? 'Lucy 2.5: Ready to stream' : 'Lucy 2.5: Ready (using camera)';
+    $('prepLucyStatus').textContent = lucyKeySet() ? 'Lucy 2.5: Ready to stream' : 'Lucy 2.5: Ready (using camera)';
 
     // Check whether the backend can convert the outgoing voice (voice-changer
     // reachable + an RVC model loaded) so the prep screen can say so up front
@@ -4725,12 +4845,21 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         status: 'Starting avatar…',
       });
       callScreenShown = true;
+      if (selectedCallSource === 'avatar') loadAnamSdk().catch(() => {}); // warm up while it rings
 
       // Activate whichever outgoing source was picked - Lucy 2.5 (live face
       // swap of your own camera) or an Anam AI avatar.
       const startAvatar = async () => {
         setStatus('Starting avatar…');
-        await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
+        try {
+          await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
+        } catch (firstErr) {
+          if (cancelled()) return;
+          console.warn('[avatar] first start failed, retrying once:', firstErr && firstErr.message);
+          try { activeSocialSource().stop(); } catch(e){}
+          await new Promise(r => setTimeout(r, 600));
+          await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
+        }
         if (cancelled()) { try { activeSocialSource().stop(); } catch(e){} return; }
         if (avatarOnWaCalls) {
           const voice = await waitForAvatarAudio(8000);
