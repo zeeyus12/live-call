@@ -32,29 +32,36 @@ STRICT RULES - precision matters more than detail:
 - Output ONLY the description clause itself (lowercase start, no leading "a photo of" or "the image shows"), 1-2 sentences, in this exact style:
 "a young person wearing a short-sleeved pink top with white ribbon ties on the back, loose pink pants, and short brown hair tied in a side ponytail."`;
 
+  // Models change often on Groq; try the configured one first (GROQ_VISION_MODEL),
+  // then known vision-capable fallbacks, and report every reason if all fail.
+  const models = [process.env.GROQ_VISION_MODEL, 'qwen/qwen3.6-27b', 'meta-llama/llama-4-scout-17b-16e-instruct', 'meta-llama/llama-4-maverick-17b-128e-instruct'].filter(Boolean);
+  const failures = [];
   try {
-    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: 'qwen/qwen3.6-27b',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: [
-            { type: 'text', text: 'Describe this reference photo per the rules.' },
-            { type: 'image_url', image_url: { url: imageUrl } },
-          ] },
-        ],
-        temperature: 0.2,
-        max_completion_tokens: 200,
-      }),
-    });
-    const data = await r.json().catch(() => ({}));
-    const description = data?.choices?.[0]?.message?.content?.trim();
-    if (!r.ok || !description) {
-      return res.status(r.status || 500).json({ error: data.error?.message || 'Description request failed' });
+    for (const model of [...new Set(models)]) {
+      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: [
+              { type: 'text', text: 'Describe this reference photo per the rules.' },
+              { type: 'image_url', image_url: { url: imageUrl } },
+            ] },
+          ],
+          temperature: 0.2,
+          max_completion_tokens: 200,
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      const description = data?.choices?.[0]?.message?.content?.trim();
+      if (r.ok && description) return res.status(200).json({ description });
+      failures.push(`${model}: ${data.error?.message || ('HTTP ' + r.status)}`);
+      console.error('[describe-reference]', failures[failures.length - 1]);
+      if (r.status === 401) break; // bad key - other models will not help
     }
-    return res.status(200).json({ description });
+    return res.status(502).json({ error: failures[0] ? failures.join(' | ').slice(0, 300) : 'Description request failed' });
   } catch (err) {
     return res.status(500).json({ error: err.message || String(err) });
   }

@@ -1319,6 +1319,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // text still goes to lfDebug() (console + hidden log) for our own diagnosis.
   function lfFriendlyError(raw){
     const s = String(raw || '').toLowerCase();
+    if (s.includes('credit') || s.includes('balance') || s.includes('quota') || s.includes('402') || s.includes('payment')) return 'Your Decart account is out of credits. Top up at platform.decart.ai, then try again.';
+    if (s.includes('429') || s.includes('rate limit') || s.includes('too many')) return 'Too many sessions at once — wait a moment and try again.';
     if (s.includes('capacity') || s.includes('busy')) return 'Servers are busy right now — please try again in a moment.';
     if (s.includes('token') || s.includes('key') || s.includes('401') || s.includes('unauthorized')) return 'We couldn\u2019t verify your account. Check your API key in Profile \u2192 API.';
     if (s.includes('camera') || s.includes('permission')) return 'Camera access is required to start Live Swap.';
@@ -1332,6 +1334,17 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     $('lfPulse')?.classList.add('error');
     lfStatus.classList.add('error');
     lfStatus.textContent = lfFriendlyError(raw);
+    // The friendly line hides the cause; add the provider's own words (trimmed)
+    // so "Something went wrong" is never a dead end.
+    let detail = '';
+    try { detail = typeof raw === 'string' ? raw : (raw && (raw.message || raw.code)) || JSON.stringify(raw); } catch(_){}
+    detail = String(detail || '').replace(/\s+/g, ' ').trim();
+    if (detail && detail !== '[object Object]' && detail !== '{}') {
+      const d = document.createElement('div');
+      d.style.cssText = 'font-size:11.5px; opacity:0.7; margin-top:8px; word-break:break-word; max-width:320px; margin-left:auto; margin-right:auto;';
+      d.textContent = 'Details: ' + detail.slice(0, 160);
+      lfStatus.appendChild(d);
+    }
     $('lfRetryBtn').style.display = 'inline-block';
   }
   function lfClearError(){
@@ -1398,7 +1411,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           statusEl.textContent = 'Reference photo ready';
           lfDebug('Reference described: ' + dd.description);
         } else {
-          statusEl.textContent = 'Reference photo added (auto-description failed — will still work, just less precisely)';
+          statusEl.textContent = 'Reference photo added (auto-description failed: ' + String(dd.error || ('HTTP ' + dr.status)).slice(0, 90) + ' — will still work, just less precisely)';
           lfDebug('Describe-reference failed: ' + (dd.error || dr.status));
         }
       } catch (descErr) {
