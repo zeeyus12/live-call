@@ -201,6 +201,12 @@ async function githubApi(path, method = 'GET') {
 // Start Telegram Bridge Python process
 let tgProcess = null;
 function startTelegramBridge() {
+  // Telegram is "coming soon": the bridge has been crash-looping (missing Python deps)
+  // and burning CPU on small hosts. Opt in with ENABLE_TELEGRAM_BRIDGE=1.
+  if (process.env.ENABLE_TELEGRAM_BRIDGE !== '1') {
+    console.log('[Server] Telegram bridge disabled (coming soon)');
+    return;
+  }
   const scriptPath = path.join(__dirname, 'server', 'telegram_bridge.py');
   if (!fs.existsSync(scriptPath)) return;
   
