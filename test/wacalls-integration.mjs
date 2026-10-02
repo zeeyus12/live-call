@@ -62,8 +62,13 @@ function check(name, cond, detail = '') {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function getJson(url, opts) {
-  const res = await fetch(url, opts);
+// Which test user a request / socket acts as (server.mjs honours "test-token:<user>"
+// only when NODE_ENV=test and LIVE_CALL_TEST_AUTH=1).
+let AS_USER = 'alice';
+const tokenFor = (u = AS_USER) => `test-token:${u}`;
+
+async function getJson(url, opts = {}) {
+  const res = await fetch(url, { ...opts, headers: { Authorization: `Bearer ${tokenFor()}`, ...(opts.headers || {}) } });
   const text = await res.text();
   let data = {};
   if (text) { try { data = JSON.parse(text); } catch (e) { data = { raw: text.slice(0, 300) }; } }
@@ -81,10 +86,15 @@ const stub = {
   paired: true,           // the session the stub reports (flipped for the QR test)
   events: [],             // queued SSE frames
   sseClients: 0,
+  extraSessions: [],      // sessions created through POST /api/sessions
   emit(type, fields = {}) {
-    this.events.push([`data: ${JSON.stringify({ type, at: Date.now(), ...fields })}\n\n`, true]);
+    this.events.push([`data: ${JSON.stringify({ type, at: Date.now(), sessionId: 's1', ...fields })}\n\n`, true]);
   },
 };
+const aliceSession = () => (stub.paired
+  ? { id: 's1', name: 'u:alice', jid: '2348012345678:12@s.whatsapp.net', state: 'open', paired: true }
+  : { id: 's1', name: 'u:alice', jid: null, state: 'qr', paired: false });
+const allSessions = () => [aliceSession(), ...stub.extraSessions];
 
 function stubJson(res, code, value) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -115,9 +125,7 @@ const stubServer = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
     res.write(`data: ${JSON.stringify({
       type: 'session-list',
-      sessions: [stub.paired
-        ? { id: 's1', name: 'Live Call', jid: '2348012345678:12@s.whatsapp.net', state: 'open', paired: true }
-        : { id: 's1', name: 'Live Call', jid: null, state: 'qr', paired: false }],
+      sessions: allSessions(),
     })}\n\n`);
     const timer = setInterval(() => {
       const next = stub.events.shift();
@@ -128,13 +136,13 @@ const stubServer = http.createServer(async (req, res) => {
   }
 
   if (p === '/api/sessions' && req.method === 'GET') {
-    return stubJson(res, 200, {
-      sessions: [stub.paired
-        ? { id: 's1', name: 'Live Call', jid: '2348012345678:12@s.whatsapp.net', state: 'open', paired: true }
-        : { id: 's1', name: 'Live Call', jid: null, state: 'qr', paired: false }],
-    });
+    return stubJson(res, 200, { sessions: allSessions() });
   }
-  if (p === '/api/sessions' && req.method === 'POST') return stubJson(res, 200, { id: 's1' });
+  if (p === '/api/sessions' && req.method === 'POST') {
+    const id = `s${2 + stub.extraSessions.length}`;
+    stub.extraSessions.push({ id, name: body?.name || '', jid: null, state: 'qr', paired: false });
+    return stubJson(res, 200, { id });
+  }
   if (/^\/api\/sessions\/s1\/pair$/.test(p) && req.method === 'POST') { res.writeHead(204); return res.end(); }
   if (/^\/api\/sessions\/s1\/logout$/.test(p) && req.method === 'POST') { res.writeHead(204); return res.end(); }
   if (/^\/api\/sessions\/s1\/history$/.test(p)) return stubJson(res, 200, { rows: [] });
@@ -181,7 +189,7 @@ const stubServer = http.createServer(async (req, res) => {
 function startServer({ port, env }) {
   const proc = spawn(process.execPath, ['server.mjs'], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(port), ...env },
+    env: { ...process.env, PORT: String(port), NODE_ENV: 'test', LIVE_CALL_TEST_AUTH: '1', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const logs = [];
@@ -199,8 +207,8 @@ async function waitFor(cond, timeoutMs, what) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
-function wsEvents(port) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/social-call/media`);
+function wsEvents(port, user = AS_USER) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/api/social-call/media?token=${encodeURIComponent(tokenFor(user))}`);
   const events = [];
   ws.on('message', (data, isBinary) => {
     if (isBinary) return;
@@ -283,7 +291,7 @@ async function main() {
     check('call placement used {video:true}', placeReq?.body?.video === true, JSON.stringify(placeReq?.body));
     check('call placement normalised the phone number', placeReq?.body?.phone === '2348012345678', JSON.stringify(placeReq?.body));
     check('call placement carried the API key', placeReq?.hasKey === true);
-    check('call placement carried X-Client-Id', placeReq?.clientId === CLIENT_ID, String(placeReq?.clientId));
+    check('call placement carried the per-user X-Client-Id', placeReq?.clientId === `${CLIENT_ID}:alice`, String(placeReq?.clientId));
 
     // WaCalls' own call-status event for that call: "connected" is the moment
     // the media plane is up. It must reach both the existing call_state
@@ -434,6 +442,52 @@ async function main() {
     check('green api contacts never touches WaCalls', stub.requests.length === reqsBeforeContacts);
     const greenStatus = await getJson(`${BASE}/api/social-call/whatsapp/status`);
     check('green api status route still exists', greenStatus.status !== 404, String(greenStatus.status));
+
+    console.log('\n== per-user WhatsApp sessions ==');
+    // No token at all: refused, nothing reaches WaCalls.
+    const reqsBeforeAnon = stub.requests.length;
+    const anon = await fetch(`${BASE}/api/social-call/wacalls/status`);
+    check('no login -> 401', anon.status === 401, String(anon.status));
+    check('no login -> WaCalls never contacted', stub.requests.length === reqsBeforeAnon);
+
+    // A different user gets their OWN fresh session, not alice's linked number.
+    stub.paired = true;
+    const aliceSt = await getJson(`${BASE}/api/social-call/wacalls/status`);
+    check('alice sees her own linked session', aliceSt.data.sessionId === 's1' && aliceSt.data.paired === true, JSON.stringify(aliceSt.data));
+    const bobSt = await getJson(`${BASE}/api/social-call/wacalls/status`, { headers: { Authorization: `Bearer ${tokenFor('bob')}` } });
+    check('bob is NOT given alice\'s session', bobSt.data.sessionId && bobSt.data.sessionId !== 's1', JSON.stringify(bobSt.data));
+    check('bob is not shown as linked', bobSt.data.paired === false, JSON.stringify(bobSt.data));
+    check('bob\'s session is named after bob', stub.extraSessions.some((x) => x.name === 'u:bob'), JSON.stringify(stub.extraSessions));
+    const bobAgain = await getJson(`${BASE}/api/social-call/wacalls/status`, { headers: { Authorization: `Bearer ${tokenFor('bob')}` } });
+    check('bob keeps the same session on the next request', bobAgain.data.sessionId === bobSt.data.sessionId);
+    check('only one session was created for bob', stub.extraSessions.filter((x) => x.name === 'u:bob').length === 1);
+
+    // Bob placing a call goes out on bob's session, never alice's.
+    const reqsBeforeBobCall = stub.requests.length;
+    await getJson(`${BASE}/api/social-call/wacalls/call`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenFor('bob')}` },
+      body: JSON.stringify({ target: '2348012345678', video: true }),
+    });
+    const bobReqs = stub.requests.slice(reqsBeforeBobCall).filter((r) => /\/calls$/.test(r.path) && r.method === 'POST');
+    const bobPlace = stub.requests.slice(reqsBeforeBobCall).find((r) => /\/calls$/.test(r.path) && r.method === 'POST');
+    check('bob\'s call carries bob\'s own client id (calls never block each other)', bobPlace?.clientId === `${CLIENT_ID}:bob`, String(bobPlace?.clientId));
+    check('bob\'s call used bob\'s session', bobReqs.length === 1 && bobReqs[0].path === `/api/sessions/${bobSt.data.sessionId}/calls`, JSON.stringify(bobReqs.map((r) => r.path)));
+
+    // Call events of alice's session reach alice's socket only.
+    const aliceWs = wsEvents(PORT, 'alice');
+    const bobWs = wsEvents(PORT, 'bob');
+    await waitFor(() => aliceWs.ws.readyState === 1 && bobWs.ws.readyState === 1, 3000, 'both sockets');
+    stub.emit('incoming', { sessionId: 's1', id: 'iso-call', peer: '2349000000000', media: 'audio' });
+    await waitFor(() => aliceWs.of('wacalls_event').some((e) => e.callId === 'iso-call'), 4000, 'alice to get her incoming call');
+    await sleep(300);
+    check('alice got her own incoming call', aliceWs.of('wacalls_event').some((e) => e.callId === 'iso-call' && e.kind === 'incoming'));
+    check('bob did NOT get alice\'s incoming call', !bobWs.events.some((e) => (e.callId === 'iso-call') || (e.call && e.call.id === 'iso-call')));
+    const unauthWs = new WebSocket(`ws://127.0.0.1:${PORT}/api/social-call/media`);
+    const unauthClosed = await new Promise((resolve) => { unauthWs.on('close', () => resolve(true)); setTimeout(() => resolve(false), 3000); });
+    check('a socket with no login is closed', unauthClosed);
+    aliceWs.ws.close(); bobWs.ws.close();
+    // clean up the call alice's incoming event created
+    await getJson(`${BASE}/api/social-call/hangup`, { method: 'POST' });
 
     console.log('\n== log lines ==');
     const log = main1.logs.join('');

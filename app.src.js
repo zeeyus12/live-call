@@ -1776,6 +1776,28 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // these calls at the Render origin explicitly is the fix.
   const SOCIAL_CALL_API_BASE = 'https://live-call-tbbk.onrender.com';
 
+  // Every call to the social-call API carries the signed-in user's token: the
+  // server uses it to pick THAT user's WhatsApp session and calls, and refuses
+  // requests that have none. One wrapper here instead of touching every fetch.
+  const _nativeFetch = window.fetch.bind(window);
+  window.fetch = async function(input, init){
+    try {
+      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      if (url.startsWith(SOCIAL_CALL_API_BASE + '/api/social-call/')) {
+        const headers = new Headers((init && init.headers) || (typeof input !== 'string' && input.headers) || {});
+        if (!headers.has('Authorization')) {
+          const a = await authHeader();
+          if (a.Authorization) headers.set('Authorization', a.Authorization);
+        }
+        init = { ...(init || {}), headers };
+      }
+    } catch(e){}
+    return _nativeFetch(input, init);
+  };
+  let socialAccessToken = '';
+  supabase.auth.getSession().then(({ data }) => { socialAccessToken = data?.session?.access_token || ''; });
+  supabase.auth.onAuthStateChange((_evt, session) => { socialAccessToken = session?.access_token || ''; });
+
   let currentSocialPlatform = null; // 'whatsapp' | 'telegram'
   let selectedSocialContact = null; // { name, target }
   let selectedCallSource = 'lucy'; // 'lucy' | 'avatar' - which outgoing source to use for a social call
@@ -1808,20 +1830,20 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // WhatsApp session.
   // -----------------------------------------------------------------
   const WA_ENGINES = {
-    greenapi: {
-      label: 'Green API',
-      hint: 'Your existing Green API account. Calls are audio-only — their calls SDK has no video support.',
-    },
     wacalls: {
       label: 'WaCalls',
-      hint: 'Real WhatsApp calls, including 1:1 VIDEO with your live Anam / Lucy 2.5 avatar as the outgoing video. Runs on your WaCalls instance — a separate session from Green API, configured server-side (WACALLS_URL).',
+      hint: 'Real WhatsApp calls, including 1:1 VIDEO with an AI avatar as the outgoing video. Link YOUR OWN WhatsApp number here - every account has its own separate session.',
+    },
+    greenapi: {
+      label: 'Green API',
+      hint: 'Your own Green API account. Calls are audio-only — their calls SDK has no video support.',
     },
   };
   const WA_ENGINE_KEY = 'livecall.whatsappEngine';
 
   function waEngine(){
     const saved = (() => { try { return localStorage.getItem(WA_ENGINE_KEY); } catch(e){ return null; } })();
-    return (saved && WA_ENGINES[saved]) ? saved : 'greenapi';
+    return (saved && WA_ENGINES[saved]) ? saved : 'wacalls';
   }
   function setWaEngine(engine){
     if (!WA_ENGINES[engine]) return;
@@ -3059,7 +3081,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     voiceConversion: false,
     initWs(){
       if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
-      this.ws = new WebSocket(SOCIAL_CALL_API_BASE.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/api/social-call/media');
+      this.ws = new WebSocket(SOCIAL_CALL_API_BASE.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/api/social-call/media?token=' + encodeURIComponent(socialAccessToken || ''));
       this.ws.binaryType = 'arraybuffer';
       this.ws.onmessage = (e) => {
         // Binary frames are tagged, length-prefixed frames (see
@@ -5065,6 +5087,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     $('pendingBox').style.display = 'none';
     authScreen.classList.add('hidden');
     await loadSettings();
+    fetchConnectedStatus();
     loadAnamAvatars();
     loadAnamVoices();
     syncSavedContacts();
@@ -5076,6 +5099,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       enterApp(session.user);
     } else {
       currentUser = null;
+      try { SocialCallMediaAdapter.watchEvents(false); } catch(e){}
       $('authBoot').style.display = 'none';
       $('authBox').style.display = '';
       $('pendingBox').style.display = 'none';

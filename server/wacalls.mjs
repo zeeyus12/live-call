@@ -41,6 +41,8 @@
 // the answer, and the frontend is told the truth: an audio-only build cannot
 // send the avatar as video.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 const TIMEOUT_MS = parseInt(process.env.WACALLS_TIMEOUT_MS || '15000', 10);
 const SSE_RETRY_MIN_MS = 2000;
 const SSE_RETRY_MAX_MS = 30000;
@@ -92,7 +94,10 @@ export function configSummary() {
 }
 
 function headers(json = false) {
-  const h = { 'X-Client-Id': CONFIG.clientId };
+  // One client id PER USER: WaCalls allows one active call per client id, so a
+  // shared id would make one user's call block everyone else's.
+  const uid = currentUserId();
+  const h = { 'X-Client-Id': uid ? `${CONFIG.clientId}:${uid}` : CONFIG.clientId };
   if (json) h['Content-Type'] = 'application/json';
   // Present on every request. Never logged, never returned to the browser.
   if (CONFIG.apiKey) h['X-API-Key'] = CONFIG.apiKey;
@@ -130,7 +135,7 @@ async function apiFetch(path, { method = 'GET', body = null, timeoutMs = CONFIG.
     // Forget the cached id and retry once against a freshly resolved session.
     const m = path.match(/^\/api\/sessions\/([^/]+)(\/.*)$/);
     if (!_retried && res.status === 404 && data?.error === 'no such session' && m) {
-      sessionCache = { id: null, resolvedAt: 0 };
+      dropSessionCache();
       const freshId = await resolveSession({ force: true });
       if (freshId && freshId !== m[1]) {
         warn(`session ${m[1]} is gone on WaCalls; retrying on ${freshId}`);
@@ -146,13 +151,41 @@ async function apiFetch(path, { method = 'GET', body = null, timeoutMs = CONFIG.
 // ---------------------------------------------------------------------------
 // Session handling
 // ---------------------------------------------------------------------------
-let sessionCache = { id: null, resolvedAt: 0 };
+// ---- per-user sessions --------------------------------------------------
+// Every signed-in user gets their OWN WhatsApp session on the WaCalls instance,
+// named "u:<supabase user id>". server.mjs runs each request (and each event
+// it handles on a user's behalf) inside userContext, and everything below
+// resolves "the session" for whoever is in that context - so no function
+// signature changed, and one user can never touch another user's number.
+// With no user in context (legacy/admin use) the old shared behaviour remains.
+export const userContext = new AsyncLocalStorage();
+export function currentUserId() { return userContext.getStore()?.userId || null; }
+const sessionCaches = new Map();           // userId|'_shared' -> { id, resolvedAt }
+const sessionOwners = new Map();           // sessionId -> userId
 const SESSION_CACHE_MS = 30_000;
+const SESSION_PREFIX = 'u:';
+
+function cacheKey() { return currentUserId() || '_shared'; }
+function getCache() { return sessionCaches.get(cacheKey()) || { id: null, resolvedAt: 0 }; }
+function setCache(id, resolvedAt = Date.now()) { sessionCaches.set(cacheKey(), { id, resolvedAt }); }
+function dropSessionCache() { sessionCaches.delete(cacheKey()); }
+
+function noteOwners(sessions) {
+  for (const sess of sessions || []) {
+    if (typeof sess?.name === 'string' && sess.name.startsWith(SESSION_PREFIX)) {
+      sessionOwners.set(sess.id, sess.name.slice(SESSION_PREFIX.length));
+    }
+  }
+}
+// Which user owns a session id (null for sessions this app did not create).
+export function ownerOf(sessionId) { return sessionOwners.get(sessionId) || null; }
 
 export async function listSessions() {
   const r = await apiFetch('/api/sessions');
   if (!r.ok) throw new Error(`WaCalls /api/sessions failed (HTTP ${r.status}): ${r.data?.error || 'no detail'}`);
-  return r.data?.sessions || [];
+  const sessions = r.data?.sessions || [];
+  noteOwners(sessions);
+  return sessions;
 }
 
 // Resolve the session this app drives. Preference order: the configured
@@ -160,28 +193,46 @@ export async function listSessions() {
 // instance has no sessions at all, create one and start pairing it (the QR
 // then shows up through the event stream - see qrPayload()).
 export async function resolveSession({ force = false } = {}) {
-  if (!force && sessionCache.id && Date.now() - sessionCache.resolvedAt < SESSION_CACHE_MS) {
-    return sessionCache.id;
+  const cached = getCache();
+  if (!force && cached.id && Date.now() - cached.resolvedAt < SESSION_CACHE_MS) {
+    return cached.id;
   }
   const sessions = await listSessions();
+
+  // A signed-in user only ever gets THEIR OWN session - never someone else's,
+  // never the shared one. Create it (and start pairing) on first use.
+  const uid = currentUserId();
+  if (uid) {
+    const wanted = SESSION_PREFIX + uid;
+    const mine = sessions.find((x) => x.name === wanted);
+    if (mine) { setCache(mine.id); return mine.id; }
+    const made = await apiFetch('/api/sessions', { method: 'POST', body: { name: wanted } });
+    if (!made.ok || !made.data?.id) {
+      throw new Error(`WaCalls could not create your session (HTTP ${made.status}): ${made.data?.error || 'no detail'}`);
+    }
+    sessionOwners.set(made.data.id, uid);
+    setCache(made.data.id);
+    log(`created session ${made.data.id} for user ${uid.slice(0, 8)}…`);
+    return made.data.id;
+  }
 
   if (CONFIG.sessionId) {
     const found = sessions.find((s) => s.id === CONFIG.sessionId);
     if (!found) {
       warn(`WACALLS_SESSION=${CONFIG.sessionId} is not a session on this instance (known: ${sessions.map((s) => s.id).join(', ') || 'none'}). Using the first paired session instead.`);
     } else {
-      sessionCache = { id: found.id, resolvedAt: Date.now() };
+      setCache(found.id);
       return found.id;
     }
   }
 
   const paired = sessions.find((s) => s.paired);
   if (paired) {
-    sessionCache = { id: paired.id, resolvedAt: Date.now() };
+    setCache(paired.id);
     return paired.id;
   }
   if (sessions.length) {
-    sessionCache = { id: sessions[0].id, resolvedAt: Date.now() };
+    setCache(sessions[0].id);
     return sessions[0].id;
   }
 
@@ -192,7 +243,7 @@ export async function resolveSession({ force = false } = {}) {
     throw new Error(`WaCalls could not create a session (HTTP ${created.status}): ${created.data?.error || 'no detail'}`);
   }
   const id = created.data.id;
-  sessionCache = { id, resolvedAt: Date.now() };
+  setCache(id);
   log(`created Session ${id} on ${CONFIG.url} - starting pairing`);
   await apiFetch(`/api/sessions/${id}/pair`, { method: 'POST' }).catch((e) => warn('pair request failed:', e.message));
   return id;
@@ -218,8 +269,8 @@ export async function logoutSession() {
   const id = await resolveSession();
   const r = await apiFetch(`/api/sessions/${id}/logout`, { method: 'POST' });
   if (!r.ok) throw new Error(`WaCalls logout failed (HTTP ${r.status}): ${r.data?.error || 'no detail'}`);
-  clearSessionEvents();
-  sessionCache = { id, resolvedAt: 0 };
+  clearSessionEvents(id);
+  dropSessionCache();
   log(`session ${id}: logged out`);
   return { sessionId: id };
 }
@@ -454,6 +505,8 @@ let sseState = {
   recent: [],          // last few normalised events, for the status route
 };
 const subscribers = new Set();
+const qrBySession = new Map();      // sessionId -> latest raw QR payload
+const pairedBySession = new Map();  // sessionId -> last known paired state
 
 function pushRecent(evt) {
   sseState.recent.push({ ...evt, at: Date.now() });
@@ -472,13 +525,17 @@ export function subscribe(cb) {
   return () => subscribers.delete(cb);
 }
 
-export function clearSessionEvents() {
-  sseState.qr = null;
-  sseState.paired = null;
+export function clearSessionEvents(sessionId) {
+  if (sessionId) { qrBySession.delete(sessionId); pairedBySession.delete(sessionId); }
+  else { sseState.qr = null; sseState.paired = null; }
 }
 
+// The pairing QR for the session of whoever is in context (their own).
 export function qrPayload() {
-  return sseState.qr;
+  const uid = currentUserId();
+  if (!uid) return sseState.qr;
+  const cached = getCache();
+  return cached.id ? (qrBySession.get(cached.id) || null) : null;
 }
 
 export function streamState() {
@@ -556,19 +613,18 @@ function applyEvent(evt) {
   if (evt.kind === 'session') {
     if (evt.subtype === 'list') {
       sseState.sessions = evt.sessions;
-      const mine = evt.sessions.find((s) => s.id === (CONFIG.sessionId || sseState.sessionId));
-      if (mine) sseState.paired = !!mine.paired;
-      if (!sessionCache.id && evt.sessions.length) sessionCache = { id: evt.sessions[0].id, resolvedAt: Date.now() };
+      noteOwners(evt.sessions);
+      for (const sess of evt.sessions) pairedBySession.set(sess.id, !!sess.paired);
     } else if (evt.subtype === 'auth') {
       sseState.sessionId = evt.sessionId;
-      if (evt.subtype === 'auth' && evt.sessionId === (CONFIG.sessionId || sessionCache.id || evt.sessionId)) {
-        sseState.paired = !!evt.paired;
-      }
-      if (evt.qr) sseState.qr = evt.qr;
-      if (evt.paired) { sseState.qr = null; log(`session ${evt.sessionId}: paired and open`); }
+      pairedBySession.set(evt.sessionId, !!evt.paired);
+      sseState.paired = !!evt.paired;
+      if (evt.qr) { sseState.qr = evt.qr; qrBySession.set(evt.sessionId, evt.qr); }
+      if (evt.paired) { sseState.qr = null; qrBySession.delete(evt.sessionId); log(`session ${evt.sessionId}: paired and open`); }
     } else if (evt.subtype === 'qr') {
       sseState.sessionId = evt.sessionId;
       sseState.qr = evt.qr;
+      if (evt.qr) qrBySession.set(evt.sessionId, evt.qr);
     }
     return evt;
   }
@@ -695,7 +751,7 @@ export async function publicStatus({ probe = false, force = false } = {}) {
     // Phone number, when WaCalls reports it. JID looks like
     // "2348012345678:12@s.whatsapp.net" - the user part is the number.
     base.phone = mine?.jid ? mine.jid.split('@')[0].split(':')[0] : null;
-    base.hasQr = !!sseState.qr;
+    base.hasQr = currentUserId() ? qrBySession.has(sessionId) : !!sseState.qr;
     if (probe) base.video = await probeVideoSupport({ force });
   } catch (e) {
     base.state = 'unreachable';
@@ -737,4 +793,5 @@ export const wacalls = {
   qrPayload,
   streamState,
   clearSessionEvents,
+  ownerOf,
 };

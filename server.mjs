@@ -10,7 +10,7 @@ import * as greenApi from './server/greenapi_bridge.mjs';
 import { getServiceClient, getAuthedUserId } from './lib/supabaseAdmin.js';
 import { getProviderKey } from './lib/keys.js';
 import { voiceChanger, startVoiceChangerProcess, VC_CONFIG } from './server/voice_changer.mjs';
-import { wacalls, isConfigured as wacallsConfigured } from './server/wacalls.mjs';
+import { wacalls, isConfigured as wacallsConfigured, userContext, currentUserId } from './server/wacalls.mjs';
 
 // ---------------------------------------------------------------------
 // WhatsApp backends. There are exactly TWO and they never touch each other:
@@ -97,7 +97,39 @@ function saveCallHistory(record) {
 }
 
 // Active social call state
-let currentActiveCall = null;
+// Active social call, PER USER. Every request / socket / event handler runs
+// inside userContext (see below), and `activeCall.v` reads and writes the call
+// of whoever is in that context - so two people can be on calls at once and
+// never see or end each other's.
+const callsByUser = new Map();
+const activeCall = {
+  get v() { return callsByUser.get(currentUserId() || '_none') || null; },
+  set v(call) {
+    const k = currentUserId() || '_none';
+    if (call) callsByUser.set(k, call); else callsByUser.delete(k);
+  },
+};
+
+// Signed-in AND approved. Same approval flag the app's login gate uses, now
+// enforced on the server too, so an unapproved account cannot place calls by
+// talking to the API directly.
+const approvalCache = new Map();
+async function authedApprovedUserId(token) {
+  if (!token) return null;
+  // Test harness only (never set in production): "test-token:<user>" is user <user>.
+  if (process.env.NODE_ENV === 'test' && process.env.LIVE_CALL_TEST_AUTH === '1' && token.startsWith('test-token:')) {
+    return token.slice('test-token:'.length) || null;
+  }
+  const supabase = getServiceClient();
+  const userId = await getAuthedUserId({ headers: { authorization: 'Bearer ' + token } }, supabase);
+  if (!userId) return null;
+  const hit = approvalCache.get(userId);
+  if (hit && Date.now() - hit.at < 60_000) return hit.ok ? userId : null;
+  const { data } = await supabase.from('user_approvals').select('approved').eq('user_id', userId).maybeSingle();
+  const ok = !!data?.approved;
+  approvalCache.set(userId, { ok, at: Date.now() });
+  return ok ? userId : null;
+}
 let tgCallsStatePoll = null;
 
 // Polls tgcalls_bridge's real call state (idle/ringing/connecting/connected/
@@ -117,15 +149,15 @@ function startTgCallsStatePoll() {
     lastState = state;
 
     if (state === 'connected') {
-      if (currentActiveCall) currentActiveCall.status = 'connected';
-      broadcastMediaEvent({ type: 'call_state', state: 'connected', call: currentActiveCall });
+      if (activeCall.v) activeCall.v.status = 'connected';
+      broadcastMediaEvent({ type: 'call_state', state: 'connected', call: activeCall.v });
     } else if (state === 'ringing' || state === 'connecting') {
-      broadcastMediaEvent({ type: 'call_state', state, call: currentActiveCall });
+      broadcastMediaEvent({ type: 'call_state', state, call: activeCall.v });
     } else if (state === 'failed') {
-      broadcastMediaEvent({ type: 'call_state', state: 'failed', error: r.data?.error, call: currentActiveCall });
+      broadcastMediaEvent({ type: 'call_state', state: 'failed', error: r.data?.error, call: activeCall.v });
       stopTgCallsStatePoll();
     } else if (state === 'ended') {
-      broadcastMediaEvent({ type: 'call_state', state: 'ended', call: currentActiveCall });
+      broadcastMediaEvent({ type: 'call_state', state: 'ended', call: activeCall.v });
       stopTgCallsStatePoll();
     }
   }, 1000);
@@ -333,7 +365,7 @@ function closeTgCallsPipes() {
 //      every normalised event on the media WebSocket that already carries
 //      call_state to the frontend, so incoming calls, accept/reject, end and
 //      media-ready/not-ready reach the UI the same way call state always has;
-//   2. mirrors the call lifecycle onto the existing currentActiveCall record
+//   2. mirrors the call lifecycle onto the existing activeCall.v record
 //      (status label, ringback, end-on-failure) so the Active Call screen
 //      needs no engine-specific plumbing for that part;
 //   3. logs the video capability of the instance it is talking to, so an
@@ -346,28 +378,30 @@ function closeTgCallsPipes() {
 // proxies only the SDP offer/answer (route below), which is what keeps the
 // API key out of the page while the media path stays browser <-> WaCalls.
 // ---------------------------------------------------------------
-let wacallsCallStatePoll = null;
+const wacallsPolls = new Map(); // userId -> interval
 
 function startWacallsStatePoll() {
   stopWacallsStatePoll();
-  wacallsCallStatePoll = setInterval(async () => {
-    if (!currentActiveCall?.callId || currentActiveCall.provider !== 'wacalls') return;
+  const uid = currentUserId() || '_none';
+  // setInterval keeps the user context it was created in.
+  wacallsPolls.set(uid, setInterval(async () => {
+    if (!activeCall.v?.callId || activeCall.v.provider !== 'wacalls') return;
     try {
-      const info = await wacalls.getCall(currentActiveCall.callId);
+      const info = await wacalls.getCall(activeCall.v.callId);
       const state = info?.state;
-      if (!state || state === currentActiveCall.wacallsState) return;
-      currentActiveCall.wacallsState = state;
+      if (!state || state === activeCall.v.wacallsState) return;
+      activeCall.v.wacallsState = state;
       if (state === 'active') {
-        if (currentActiveCall.status !== 'connected') {
-          currentActiveCall.status = 'connected';
-          console.log(`[WaCalls] call ${currentActiveCall.callId} is ACTIVE - media ready`);
-          broadcastMediaEvent({ type: 'call_state', state: 'connected', call: currentActiveCall });
+        if (activeCall.v.status !== 'connected') {
+          activeCall.v.status = 'connected';
+          console.log(`[WaCalls] call ${activeCall.v.callId} is ACTIVE - media ready`);
+          broadcastMediaEvent({ type: 'call_state', state: 'connected', call: activeCall.v });
         }
       } else if (state === 'ringing' || state === 'initiating' || state === 'held') {
-        broadcastMediaEvent({ type: 'call_state', state: state === 'held' ? 'connecting' : 'ringing', call: currentActiveCall });
+        broadcastMediaEvent({ type: 'call_state', state: state === 'held' ? 'connecting' : 'ringing', call: activeCall.v });
       } else if (state === 'ended') {
-        console.log(`[WaCalls] call ${currentActiveCall.callId} ended`);
-        broadcastMediaEvent({ type: 'call_state', state: 'ended', call: currentActiveCall });
+        console.log(`[WaCalls] call ${activeCall.v.callId} ended`);
+        broadcastMediaEvent({ type: 'call_state', state: 'ended', call: activeCall.v });
         stopWacallsStatePoll();
       }
     } catch (e) {
@@ -375,11 +409,13 @@ function startWacallsStatePoll() {
       // not hang up a live call) - the event stream is the source of truth for
       // the call ending; this poll only fills in gaps.
     }
-  }, 1500);
+  }, 1500));
 }
 
 function stopWacallsStatePoll() {
-  if (wacallsCallStatePoll) { clearInterval(wacallsCallStatePoll); wacallsCallStatePoll = null; }
+  const uid = currentUserId() || '_none';
+  const t = wacallsPolls.get(uid);
+  if (t) { clearInterval(t); wacallsPolls.delete(uid); }
 }
 
 // One WaCalls event -> the existing frontend surfaces.
@@ -394,6 +430,15 @@ function stopWacallsStatePoll() {
 //    source state) listens to, including the media-ready/not-ready pair the
 //    integration is required to expose.
 wacalls.subscribe((evt) => {
+  // Events from the shared WaCalls instance cover every user's sessions. Each
+  // one is handled as the user who owns that session, so call state and the
+  // media-socket broadcast reach only them.
+  const owner = evt.sessionId ? wacalls.ownerOf(evt.sessionId) : null;
+  if (!owner) return;
+  userContext.run({ userId: owner }, () => handleWacallsEvent(evt));
+});
+
+function handleWacallsEvent(evt) {
   const payload = {
     type: 'wacalls_event',
     kind: evt.kind,
@@ -416,8 +461,8 @@ wacalls.subscribe((evt) => {
     // everything else: the state poll, the avatar switch, the hangup route
     // (which is where the call is actually deleted on WaCalls) and the call
     // history record.
-    if (!currentActiveCall || currentActiveCall.callId === evt.callId) {
-      currentActiveCall = {
+    if (!activeCall.v || activeCall.v.callId === evt.callId) {
+      activeCall.v = {
         id: 'call_' + Date.now(),
         platform: 'whatsapp',
         provider: 'wacalls',
@@ -444,34 +489,34 @@ wacalls.subscribe((evt) => {
   } else if (evt.kind === 'ended') {
     console.log(`[WaCalls] call ended: callId=${evt.callId || 'unknown'} reason=${evt.reason || 'unknown'}`);
     broadcastMediaEvent({ type: 'wa_call_event', call: { id: evt.callId, status: 'terminate', reason: evt.reason } });
-    broadcastMediaEvent({ type: 'call_state', state: 'ended', call: currentActiveCall });
+    broadcastMediaEvent({ type: 'call_state', state: 'ended', call: activeCall.v });
     // An incoming call that ended without ever being answered has no browser
     // side to hang up: the record it created here is closed out and saved now.
-    if (currentActiveCall && (!evt.callId || currentActiveCall.callId === evt.callId)) {
-      if (currentActiveCall.status !== 'ended') {
-        const durationSec = Math.round((Date.now() - currentActiveCall.startedAt) / 1000);
+    if (activeCall.v && (!evt.callId || activeCall.v.callId === evt.callId)) {
+      if (activeCall.v.status !== 'ended') {
+        const durationSec = Math.round((Date.now() - activeCall.v.startedAt) / 1000);
         saveCallHistory({
-          ...currentActiveCall,
-          status: currentActiveCall.status === 'ringing' ? 'missed' : 'ended',
+          ...activeCall.v,
+          status: activeCall.v.status === 'ringing' ? 'missed' : 'ended',
           reason: evt.reason || null,
           duration: `${durationSec}s`,
           endedAt: Date.now(),
         });
       }
-      currentActiveCall = null;
+      activeCall.v = null;
     }
     stopWacallsStatePoll();
   } else if (evt.kind === 'media-ready') {
     console.log(`[WaCalls] media READY for callId=${evt.callId || 'unknown'} (${evt.subtype})`);
-    if (currentActiveCall && (!evt.callId || currentActiveCall.callId === evt.callId)) {
-      currentActiveCall.status = 'connected';
-      if (evt.media) currentActiveCall.media = evt.media;
-      broadcastMediaEvent({ type: 'call_state', state: 'connected', call: currentActiveCall });
+    if (activeCall.v && (!evt.callId || activeCall.v.callId === evt.callId)) {
+      activeCall.v.status = 'connected';
+      if (evt.media) activeCall.v.media = evt.media;
+      broadcastMediaEvent({ type: 'call_state', state: 'connected', call: activeCall.v });
     }
   } else if (evt.kind === 'media-not-ready') {
     // Includes call-status events before "connected" and the held state.
     if (evt.subtype === 'call-status' && evt.media) {
-      const downgrade = wacalls.noteCallMedia(evt.callId, evt.media, currentActiveCall?.videoRequested);
+      const downgrade = wacalls.noteCallMedia(evt.callId, evt.media, activeCall.v?.videoRequested);
       if (downgrade) payload.videoDowngrade = downgrade;
     }
   } else if (evt.kind === 'video-request') {
@@ -481,7 +526,7 @@ wacalls.subscribe((evt) => {
   }
 
   broadcastMediaEvent(payload);
-});
+}
 
 // Parse request body
 // Parse request body
@@ -520,6 +565,19 @@ const server = http.createServer(async (req, res) => {
   // -------------------------------------------------------------
   if (pathname.startsWith('/api/social-call/')) {
     const subpath = pathname.replace('/api/social-call/', '');
+
+    // Everything here acts on the caller's OWN accounts and calls, so the
+    // caller must be signed in and approved. From here on this request runs in
+    // that user's context (their WhatsApp session, their active call).
+    let callerId = null;
+    try {
+      callerId = await authedApprovedUserId((req.headers.authorization || '').replace('Bearer ', ''));
+    } catch (e) { callerId = null; }
+    if (!callerId) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'Not signed in (or not approved yet)' }));
+    }
+    userContext.enterWith({ userId: callerId });
 
     // Overall status of connected accounts
     if (subpath === 'status' && req.method === 'GET') {
@@ -723,9 +781,9 @@ const server = http.createServer(async (req, res) => {
 
         if (tail === 'answer' && req.method === 'POST') {
           const r = await wacalls.answerCall(body.callId);
-          if (currentActiveCall && (!body.callId || currentActiveCall.callId === body.callId)) {
-            currentActiveCall.status = 'connecting';
-            broadcastMediaEvent({ type: 'call_state', state: 'connecting', call: currentActiveCall });
+          if (activeCall.v && (!body.callId || activeCall.v.callId === body.callId)) {
+            activeCall.v.status = 'connecting';
+            broadcastMediaEvent({ type: 'call_state', state: 'connecting', call: activeCall.v });
           }
           console.log(`[WaCalls] incoming call answered from the app: callId=${body.callId}`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -734,10 +792,10 @@ const server = http.createServer(async (req, res) => {
 
         if (tail === 'reject' && req.method === 'POST') {
           const r = await wacalls.rejectCall(body.callId);
-          if (currentActiveCall && currentActiveCall.callId === body.callId) {
-            const durationSec = Math.round((Date.now() - currentActiveCall.startedAt) / 1000);
-            saveCallHistory({ ...currentActiveCall, status: 'rejected', duration: `${durationSec}s`, endedAt: Date.now() });
-            currentActiveCall = null;
+          if (activeCall.v && activeCall.v.callId === body.callId) {
+            const durationSec = Math.round((Date.now() - activeCall.v.startedAt) / 1000);
+            saveCallHistory({ ...activeCall.v, status: 'rejected', duration: `${durationSec}s`, endedAt: Date.now() });
+            activeCall.v = null;
             stopWacallsStatePoll();
           }
           broadcastMediaEvent({ type: 'call_state', state: 'ended', call: null });
@@ -799,14 +857,14 @@ const server = http.createServer(async (req, res) => {
         // encoder. Never fails the call: a logging hiccup must not drop video.
         if (tail === 'avatar' && req.method === 'POST') {
           const source = body.source === 'anam' ? 'anam' : 'lucy';
-          if (currentActiveCall) {
-            currentActiveCall.avatarSource = source;
-            currentActiveCall.avatarSwitchedAt = Date.now();
+          if (activeCall.v) {
+            activeCall.v.avatarSource = source;
+            activeCall.v.avatarSwitchedAt = Date.now();
           }
-          console.log(`[WaCalls] avatar video source switched to ${source === 'anam' ? 'Anam' : 'Lucy 2.5'}${currentActiveCall ? ` for callId=${currentActiveCall.callId || 'pending'}` : ' (no active call)'}`);
-          broadcastMediaEvent({ type: 'wacalls_event', kind: 'avatar-switched', source, callId: currentActiveCall?.callId || null });
+          console.log(`[WaCalls] avatar video source switched to ${source === 'anam' ? 'Anam' : 'Lucy 2.5'}${activeCall.v ? ` for callId=${activeCall.v.callId || 'pending'}` : ' (no active call)'}`);
+          broadcastMediaEvent({ type: 'wacalls_event', kind: 'avatar-switched', source, callId: activeCall.v?.callId || null });
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ ok: true, source, callId: currentActiveCall?.callId || null }));
+          return res.end(JSON.stringify({ ok: true, source, callId: activeCall.v?.callId || null }));
         }
 
         // Text messaging is deliberately not proxied: WaCalls has no
@@ -934,14 +992,14 @@ const server = http.createServer(async (req, res) => {
       // WaCalls allows ONE active call per client id. A previous call that never
       // got a clean hangup (page closed or crashed mid-setup, media ICE failure)
       // still holds that slot, and the next call then never rings. Free it first.
-      const staleCall = currentActiveCall;
+      const staleCall = activeCall.v;
       if (platform === 'whatsapp' && waProvider === 'wacalls' && staleCall?.callId && staleCall.provider === 'wacalls') {
         try { await wacalls.endCall(staleCall.callId); console.log(`[WaCalls] released stale call ${staleCall.callId} before placing a new one`); }
         catch (e) { console.warn(`[WaCalls] could not release stale call ${staleCall.callId}: ${e.message}`); }
         stopWacallsStatePoll();
       }
 
-      currentActiveCall = {
+      activeCall.v = {
         id: 'call_' + Date.now(),
         platform,
         provider: waProvider,
@@ -966,11 +1024,11 @@ const server = http.createServer(async (req, res) => {
           // media leg attaches to.
           const wantVideo = video !== false;
           const r = await wacalls.startCall({ target, video: wantVideo, name: name || target });
-          currentActiveCall.callId = r.callId;
-          currentActiveCall.sessionId = r.sessionId;
-          currentActiveCall.videoRequested = wantVideo;
-          currentActiveCall.avatarSource = source === 'anam' ? 'anam' : 'lucy';
-          console.log(`[WaCalls] outgoing ${wantVideo ? 'video' : 'audio'} call placed: callId=${r.callId} target=${target} avatar=${currentActiveCall.avatarSource}`);
+          activeCall.v.callId = r.callId;
+          activeCall.v.sessionId = r.sessionId;
+          activeCall.v.videoRequested = wantVideo;
+          activeCall.v.avatarSource = source === 'anam' ? 'anam' : 'lucy';
+          console.log(`[WaCalls] outgoing ${wantVideo ? 'video' : 'audio'} call placed: callId=${r.callId} target=${target} avatar=${activeCall.v.avatarSource}`);
           // Media-ready is driven by WaCalls' own call-status event (see the
           // event bridge above); this poll is the safety net for the case
           // where the event stream misses a transition.
@@ -998,16 +1056,16 @@ const server = http.createServer(async (req, res) => {
           startTgCallsStatePoll();
         }
 
-        broadcastMediaEvent({ type: 'call_state', state: 'calling', call: currentActiveCall });
+        broadcastMediaEvent({ type: 'call_state', state: 'calling', call: activeCall.v });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ status: 'call_started', call: currentActiveCall }));
+        return res.end(JSON.stringify({ status: 'call_started', call: activeCall.v }));
       } catch (err) {
         // Nothing half-placed is left behind: whatever the engine did before
         // failing is torn down (Telegram pipes, WaCalls state poll) and the
         // caller gets the real reason from WaCalls/the bridge, not a generic
         // failure.
-        currentActiveCall = null;
+        activeCall.v = null;
         closeTgCallsPipes();
         stopTgCallsStatePoll();
         stopWacallsStatePoll();
@@ -1111,39 +1169,39 @@ const server = http.createServer(async (req, res) => {
 
     // Hangup endpoint
     if (subpath === 'hangup' && req.method === 'POST') {
-      if (currentActiveCall) {
-        const durationSec = Math.round((Date.now() - currentActiveCall.startedAt) / 1000);
+      if (activeCall.v) {
+        const durationSec = Math.round((Date.now() - activeCall.v.startedAt) / 1000);
         saveCallHistory({
-          ...currentActiveCall,
+          ...activeCall.v,
           duration: `${Math.floor(durationSec / 60)}m ${durationSec % 60}s`,
           endedAt: Date.now(),
         });
 
-        if (currentActiveCall.platform === 'whatsapp' && currentActiveCall.provider === 'wacalls') {
+        if (activeCall.v.platform === 'whatsapp' && activeCall.v.provider === 'wacalls') {
           // Real hangup: WaCalls sends WhatsApp's own terminate to the peer
           // and tears its media task down. A failure here (already gone, or
           // WaCalls briefly unreachable) is logged, never thrown at the user:
           // the local call screen closes either way.
-          if (currentActiveCall.callId) {
+          if (activeCall.v.callId) {
             try {
-              await wacalls.endCall(currentActiveCall.callId);
+              await wacalls.endCall(activeCall.v.callId);
             } catch (e) {
-              console.warn(`[WaCalls] hangup for callId=${currentActiveCall.callId} failed: ${e.message}`);
+              console.warn(`[WaCalls] hangup for callId=${activeCall.v.callId} failed: ${e.message}`);
             }
           }
           stopWacallsStatePoll();
-        } else if (currentActiveCall.platform === 'whatsapp') {
+        } else if (activeCall.v.platform === 'whatsapp') {
           // No server-side hangup call for Green API - the frontend calls
           // gaClient.hangUp() directly (client-side), same as placing the
           // call itself.
-        } else if (currentActiveCall.platform === 'telegram') {
+        } else if (activeCall.v.platform === 'telegram') {
           await proxyToTgCalls('/hangup', 'POST').catch(() => {});
           closeTgCallsPipes();
           stopTgCallsStatePoll();
         }
 
         broadcastMediaEvent({ type: 'call_state', state: 'ended' });
-        currentActiveCall = null;
+        activeCall.v = null;
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ status: 'ended' }));
@@ -1302,7 +1360,7 @@ function vcSamplesToBuffer(samples) {
 // Where outgoing call audio went BEFORE voice conversion existed (kept
 // verbatim - this is the fallback path and the non-converted path).
 function writeRawCallAudio(payload) {
-  if (currentActiveCall?.platform === 'telegram' && tgCallsAudioStream && !tgCallsAudioStream.destroyed) {
+  if (activeCall.v?.platform === 'telegram' && tgCallsAudioStream && !tgCallsAudioStream.destroyed) {
     tgCallsAudioStream.write(payload);
   }
 }
@@ -1318,15 +1376,17 @@ function broadcastConvertedAudio(samples) {
   tagged[0] = MEDIA_CH.RVC_AUDIO_OUT;
   tagged.writeUInt32BE(payload.byteLength, 1);
   payload.copy(tagged, 5);
+  const uid = currentUserId();
+  if (!uid) return;
   for (const ws of mediaClients) {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws.readyState === WebSocket.OPEN && ws.userId === uid) {
       try { ws.send(tagged); } catch (e) {}
     }
   }
 }
 
 function handleConvertedAudio(samples) {
-  const platform = voiceChanger.session?.platform || currentActiveCall?.platform;
+  const platform = voiceChanger.session?.platform || activeCall.v?.platform;
   if (platform === 'telegram') {
     writeRawCallAudio(vcSamplesToBuffer(samples));
     return;
@@ -1347,7 +1407,7 @@ async function startVoiceConversion({ platform, modelSlot } = {}) {
       await voiceChanger.selectModel(VC_CONFIG.modelSlot);
     }
     await voiceChanger.startSession({
-      platform: platform || currentActiveCall?.platform || null,
+      platform: platform || activeCall.v?.platform || null,
       onConverted: handleConvertedAudio,
     });
   } catch (e) {
@@ -1402,8 +1462,10 @@ const mediaClients = new Set();
 
 function broadcastMediaEvent(msg) {
   const payload = typeof msg === 'string' ? msg : JSON.stringify(msg);
+  const uid = currentUserId();
+  if (!uid) return; // never fan out to everyone: with no owner, nobody gets it
   for (const ws of mediaClients) {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws.readyState === WebSocket.OPEN && ws.userId === uid) {
       ws.send(payload);
     }
   }
@@ -1416,8 +1478,10 @@ function broadcastMediaEvent(msg) {
 // video arrive on the browser's own WebRTC data channels - but the framing and
 // the browser-side parser stay, because the RVC return path (0x06) shares them.
 function broadcastMediaBinary(buffer) {
+  const uid = currentUserId();
+  if (!uid) return;
   for (const ws of mediaClients) {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws.readyState === WebSocket.OPEN && ws.userId === uid) {
       ws.send(buffer);
     }
   }
@@ -1430,16 +1494,25 @@ function broadcastMediaBinary(buffer) {
 // status on its own timer, which is how the WhatsApp connect screen
 // learns about changes now.
 
-wss.on('connection', (ws) => {
+wss.on('connection', async (ws, req) => {
+  let uid = null;
+  try {
+    const token = new URL(req.url, 'http://x').searchParams.get('token') || '';
+    uid = await authedApprovedUserId(token);
+  } catch (e) { uid = null; }
+  if (!uid) { try { ws.close(4401, 'unauthorized'); } catch (e) {} return; }
+  ws.userId = uid;
+  // Everything this socket triggers runs as its user.
+  userContext.enterWith({ userId: uid });
   mediaClients.add(ws);
   console.log('[MediaWS] Client connected. Total:', mediaClients.size);
 
   // Send current active call state if any
-  if (currentActiveCall) {
-    ws.send(JSON.stringify({ type: 'call_state', state: currentActiveCall.status, call: currentActiveCall }));
+  if (activeCall.v) {
+    ws.send(JSON.stringify({ type: 'call_state', state: activeCall.v.status, call: activeCall.v }));
   }
 
-  ws.on('message', (data, isBinary) => {
+  ws.on('message', (data, isBinary) => userContext.run({ userId: uid }, () => {
     if (isBinary) {
       // Binary frame from Lucy 2.5 canvas / video stream or mic PCM
       // First byte can be channel identifier: 0x01 = Lucy video frame, 0x02 = Mic audio
@@ -1454,7 +1527,7 @@ wss.on('connection', (ws) => {
         // Telegram P2P call, tgcalls_bridge's set_media() reads outgoing
         // video from TGCALLS_VIDEO_PIPE as a concatenated-JPEG (MJPEG)
         // stream, decoded by ffmpeg on that side.
-        if (currentActiveCall?.platform === 'telegram' && tgCallsVideoStream && !tgCallsVideoStream.destroyed) {
+        if (activeCall.v?.platform === 'telegram' && tgCallsVideoStream && !tgCallsVideoStream.destroyed) {
           tgCallsVideoStream.write(payload);
         }
         // WaCalls does NOT consume these bytes on the server side: its
@@ -1485,9 +1558,9 @@ wss.on('connection', (ws) => {
       try {
         const msg = JSON.parse(data.toString());
         if (msg.type === 'call_ready') {
-          if (currentActiveCall) {
-            currentActiveCall.status = 'connected';
-            broadcastMediaEvent({ type: 'call_state', state: 'connected', call: currentActiveCall });
+          if (activeCall.v) {
+            activeCall.v.status = 'connected';
+            broadcastMediaEvent({ type: 'call_state', state: 'connected', call: activeCall.v });
           }
         } else if (msg.type === 'vc_start') {
           // Starts real-time conversion of the outgoing Lucy audio for this
@@ -1501,20 +1574,20 @@ wss.on('connection', (ws) => {
         }
       } catch (e) {}
     }
-  });
+  }));
 
-  ws.on('close', () => {
+  ws.on('close', () => userContext.run({ userId: uid }, () => {
     mediaClients.delete(ws);
     // Nothing left to convert if the last browser is gone and no call is up.
     // Deliberately delayed: a socket that is merely reconnecting mid-call
     // must not lose the conversion it is using.
     setTimeout(() => {
-      if (mediaClients.size === 0 && !currentActiveCall && voiceChanger.session) {
+      if (![...mediaClients].some((c) => c.userId === uid) && !activeCall.v && voiceChanger.session) {
         console.log('[MediaWS] last client gone with no active call - stopping voice conversion');
         voiceChanger.stopSession();
       }
     }, 2000);
-  });
+  }));
 });
 
 // Start services
