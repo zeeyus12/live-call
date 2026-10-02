@@ -5,7 +5,7 @@
   "scripts": {
     "minify": "node build.js",
     "start": "node server.mjs",
-    "test": "node test/wacalls-integration.mjs && node test/anam-prompt.mjs && node test/provider-wiring.mjs",
+    "test": "node test/wacalls-integration.mjs && node test/anam-prompt.mjs && node test/provider-wiring.mjs && node test/whatsapp-access.mjs",
     "voice-changer:setup": "bash server/voicechanger/setup.sh",
     "voice-changer:start": "bash server/voicechanger/start.sh",
     "postinstall": "pip3 install -r requirements.txt || pip install -r requirements.txt || echo 'WARNING: could not install Python deps for the Telegram bridge - see requirements.txt'; bash server/madeline_bridge/build.sh"

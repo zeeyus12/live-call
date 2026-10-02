@@ -55,8 +55,15 @@
   .userRow .date{font-size:11.5px; color:var(--dim); margin-top:2px;}
   .toggleBtn{padding:9px 14px; border-radius:9px; font-size:13px; font-weight:650; flex:none;}
   .toggleBtn.approved{background:var(--accent); color:#fff;}
-  .lockBtn{margin-left:8px;}
-  .lockBtn.locked{background:#c0392b; color:#fff;}
+  .userRow{flex-wrap:wrap;}
+  .waBox{flex-basis:100%; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; padding-top:10px; border-top:1px solid var(--line);}
+  .waState{font-size:12.5px; font-weight:650;}
+  .waState.open{color:#25D366;}
+  .waState.closed{color:#e0a458;}
+  .waBtns{display:flex; gap:8px; flex-wrap:wrap;}
+  .waBtns .toggleBtn{padding:7px 12px; font-size:12.5px; background:#2a1f1a; color:#fff; border:1px solid var(--line);}
+  .waBtns .toggleBtn.approved{background:var(--accent); border-color:var(--accent);}
+  .waBtns .toggleBtn.locked{background:#c0392b; border-color:#c0392b;}
   .toggleBtn.pending{background:#3a2620; color:var(--dim); border:1px solid var(--line);}
 
   .splashBgCard{position:relative; border-radius:12px; overflow:hidden; border:1px solid var(--line); aspect-ratio:9/16; background:var(--panel);}
@@ -350,13 +357,19 @@
         <button class="toggleBtn ${u.approved ? 'approved' : 'pending'}" data-id="${u.user_id}" data-approved="${u.approved}">
           ${u.approved ? 'Approved' : 'Approve'}
         </button>
-        <button class="toggleBtn lockBtn ${u.anam_key_locked ? 'locked' : ''}" data-id="${u.user_id}" data-locked="${u.anam_key_locked}">
-          ${u.anam_key_locked ? 'Anam key locked' : 'Lock Anam key'}
-        </button>
+        <div class="waBox">
+          <div class="waState ${u.whatsapp.allowed ? 'open' : 'closed'}">WhatsApp: ${waLabel(u.whatsapp)}</div>
+          <div class="waBtns">
+            <button class="toggleBtn waOpen" data-id="${u.user_id}">Open…</button>
+            ${u.whatsapp.allowed && !u.whatsapp.unlimited ? `<button class="toggleBtn waLock locked" data-id="${u.user_id}">Lock</button>` : ''}
+            <button class="toggleBtn waPro ${u.whatsapp.plan === 'pro' ? 'approved' : ''}" data-id="${u.user_id}" data-pro="${u.whatsapp.plan === 'pro'}">${u.whatsapp.plan === 'pro' ? 'Pro ✓' : 'Make Pro'}</button>
+          </div>
+        </div>
       </div>
     `).join('');
+    if (data.whatsappTableMissing) $('hint').textContent = 'Run sql/011_whatsapp_access.sql in Supabase to enable the WhatsApp lock.';
 
-    document.querySelectorAll('.toggleBtn:not(.lockBtn)').forEach(btn => {
+    document.querySelectorAll('.toggleBtn:not(.waOpen):not(.waLock):not(.waPro)').forEach(btn => {
       btn.addEventListener('click', async () => {
         const newApproved = btn.dataset.approved !== 'true';
         const { data: { session } } = await supabase.auth.getSession();
@@ -369,18 +382,35 @@
       });
     });
 
-    document.querySelectorAll('.lockBtn').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const newLocked = btn.dataset.locked !== 'true';
-        const { data: { session } } = await supabase.auth.getSession();
-        await fetch('/api/admin-set-approval', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-          body: JSON.stringify({ targetUserId: btn.dataset.id, anamKeyLocked: newLocked }),
-        });
-        loadUsers();
+    const setWhatsapp = async (targetUserId, whatsapp) => {
+      const { data: { session } } = await supabase.auth.getSession();
+      const r = await fetch('/api/admin-set-approval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ targetUserId, whatsapp }),
       });
-    });
+      if (!r.ok) alert((await r.json().catch(() => ({}))).error || 'Could not save');
+      loadUsers();
+    };
+    document.querySelectorAll('.waOpen').forEach(btn => btn.addEventListener('click', () => {
+      const v = prompt('How many minutes to give this user? (added to what they have left)', '30');
+      if (v === null) return;
+      const minutes = Number(v);
+      if (!Number.isFinite(minutes) || minutes <= 0) { alert('Enter a number of minutes greater than 0.'); return; }
+      setWhatsapp(btn.dataset.id, { action: 'open', minutes });
+    }));
+    document.querySelectorAll('.waLock').forEach(btn => btn.addEventListener('click', () => {
+      setWhatsapp(btn.dataset.id, { action: 'lock' });
+    }));
+    document.querySelectorAll('.waPro').forEach(btn => btn.addEventListener('click', () => {
+      setWhatsapp(btn.dataset.id, { action: 'pro', on: btn.dataset.pro !== 'true' });
+    }));
+  }
+
+  function waLabel(a){
+    if (a.plan === 'pro') return 'Pro (unlimited)';
+    if (a.allowed) return `open — ${a.minutesRemaining} min left`;
+    return a.reason === 'no_minutes' ? 'minutes used up' : 'locked';
   }
 
   async function loadLoginBg(){

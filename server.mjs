@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import QRCode from 'qrcode';
 import * as greenApi from './server/greenapi_bridge.mjs';
 import { getServiceClient, getAuthedUserId } from './lib/supabaseAdmin.js';
+import { evaluateAccess, ACCESS_MESSAGES } from './lib/whatsappAccess.js';
 import { getProviderKey } from './lib/keys.js';
 import { voiceChanger, startVoiceChangerProcess, VC_CONFIG } from './server/voice_changer.mjs';
 import { wacalls, isConfigured as wacallsConfigured, userContext, currentUserId } from './server/wacalls.mjs';
@@ -88,6 +89,7 @@ try {
 }
 
 function saveCallHistory(record) {
+  try { clearCallLimit(); chargeWhatsappMinutes(record); } catch (e) {}
   callHistory.unshift(record);
   if (callHistory.length > 100) callHistory.pop();
   try {
@@ -113,23 +115,177 @@ const activeCall = {
 // Signed-in AND approved. Same approval flag the app's login gate uses, now
 // enforced on the server too, so an unapproved account cannot place calls by
 // talking to the API directly.
+//
+// Every way this can fail has its own reason, logged here and sent to the
+// page, because they need different fixes and one catch-all sentence ("not
+// signed in or not approved") hid which one was happening:
+//   no_token        the page sent no login token
+//   bad_token       the token is expired / not valid for this project
+//   not_configured  this server has no SUPABASE_SERVICE_ROLE_KEY
+//   not_approved    signed in fine, but no approved row in user_approvals
+//   check_failed    Supabase could not be reached / errored
 const approvalCache = new Map();
-async function authedApprovedUserId(token) {
-  if (!token) return null;
+const AUTH_FAILURES = {
+  no_token:       { status: 401, error: 'Your login token was not sent. Sign out and sign in again.' },
+  bad_token:      { status: 401, error: 'Your session expired. Sign out and sign in again.' },
+  not_configured: { status: 503, error: 'This server cannot verify accounts: SUPABASE_SERVICE_ROLE_KEY is not set on it.' },
+  not_approved:   { status: 403, error: 'Your account is not approved yet.' },
+  check_failed:   { status: 503, error: 'Could not verify your account right now. Try again in a moment.' },
+};
+async function authCheck(token) {
+  if (!token) return { reason: 'no_token' };
   // Test harness only (never set in production): "test-token:<user>" is user <user>.
   if (process.env.NODE_ENV === 'test' && process.env.LIVE_CALL_TEST_AUTH === '1' && token.startsWith('test-token:')) {
-    return token.slice('test-token:'.length) || null;
+    const u = token.slice('test-token:'.length);
+    return u ? { userId: u, email: null, reason: null } : { reason: 'bad_token' };
   }
-  const supabase = getServiceClient();
-  const userId = await getAuthedUserId({ headers: { authorization: 'Bearer ' + token } }, supabase);
-  if (!userId) return null;
-  const hit = approvalCache.get(userId);
-  if (hit && Date.now() - hit.at < 60_000) return hit.ok ? userId : null;
-  const { data } = await supabase.from('user_approvals').select('approved').eq('user_id', userId).maybeSingle();
+  let supabase;
+  try { supabase = getServiceClient(); }
+  catch (e) { console.error('[auth] ' + e.message); return { reason: 'not_configured' }; }
+  let user = null;
+  try {
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data?.user) return { reason: 'bad_token' };
+    user = data.user;
+  } catch (e) {
+    console.error('[auth] token check failed: ' + e.message);
+    return { reason: 'check_failed' };
+  }
+  const hit = approvalCache.get(user.id);
+  if (hit && Date.now() - hit.at < 60_000) {
+    return hit.ok ? { userId: user.id, email: hit.email, reason: null } : { reason: 'not_approved' };
+  }
+  const { data, error } = await supabase.from('user_approvals').select('approved').eq('user_id', user.id).maybeSingle();
+  if (error) {
+    // Not cached: a Supabase hiccup must not lock someone out for a minute.
+    console.error(`[auth] approval lookup failed for ${user.id}: ${error.message}`);
+    return { reason: 'check_failed' };
+  }
   const ok = !!data?.approved;
-  approvalCache.set(userId, { ok, at: Date.now() });
-  return ok ? userId : null;
+  approvalCache.set(user.id, { ok, at: Date.now(), email: user.email || null });
+  if (!ok) {
+    console.warn(`[auth] user ${user.id} refused: ${data ? 'approved is false' : 'no row in user_approvals (or the server key cannot read it)'}`);
+    return { reason: 'not_approved' };
+  }
+  return { userId: user.id, email: user.email || null, reason: null };
 }
+async function authedApprovedUserId(token) {
+  const r = await authCheck(token);
+  return r.userId || null;
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp access lock + minutes (see lib/whatsappAccess.js, sql/011).
+// Locked by default; the admin opens it per user with a number of minutes;
+// Pro is unlimited. Enforced HERE because this is the server that actually
+// pairs sessions and places calls.
+// ---------------------------------------------------------------------------
+const accessCache = new Map(); // userId -> { at, access }
+const isTestAuth = () => process.env.NODE_ENV === 'test' && process.env.LIVE_CALL_TEST_AUTH === '1';
+const isAdminEmail = (email) =>
+  !!email && !!process.env.ADMIN_EMAIL && email.trim().toLowerCase() === process.env.ADMIN_EMAIL.trim().toLowerCase();
+
+async function whatsappAccessFor(userId, { fresh = false } = {}) {
+  if (isTestAuth()) {
+    // Test harness only: LIVE_CALL_TEST_WA_ACCESS = "locked" | "open:<minutes>" | "pro".
+    const forced = process.env.LIVE_CALL_TEST_WA_ACCESS || '';
+    if (forced === 'locked') return evaluateAccess(null);
+    if (forced.startsWith('open:')) return evaluateAccess({ unlocked: true, minutes_granted: Number(forced.slice(5)) });
+    if (forced === 'pro') return evaluateAccess({ plan: 'pro' });
+    return { allowed: true, unlimited: true, plan: 'test', minutesRemaining: null, reason: null };
+  }
+  const hit = accessCache.get(userId);
+  if (!fresh && hit && Date.now() - hit.at < 10_000) return hit.access;
+  const email = approvalCache.get(userId)?.email || null;
+  let row = null;
+  try {
+    const { data, error } = await getServiceClient().from('whatsapp_access').select('*').eq('user_id', userId).maybeSingle();
+    if (error) {
+      const missing = error.code === '42P01' || error.code === 'PGRST205' || /does not exist|schema cache/i.test(error.message || '');
+      if (missing) {
+        // The migration has not been run yet. Fail OPEN so deploying this code
+        // before running sql/011 cannot lock everybody out; say so loudly.
+        console.error('[access] whatsapp_access table is missing - run sql/011_whatsapp_access.sql. WhatsApp is NOT locked until then.');
+        return { allowed: true, unlimited: true, plan: 'unmetered', minutesRemaining: null, reason: null };
+      }
+      throw error;
+    }
+    row = data;
+  } catch (e) {
+    console.error(`[access] lookup failed for ${userId}: ${e.message}`);
+    return { allowed: false, unlimited: false, plan: 'free', minutesRemaining: 0, reason: 'check_failed' };
+  }
+  const access = evaluateAccess(row, { isAdmin: isAdminEmail(email) });
+  accessCache.set(userId, { at: Date.now(), access });
+  return access;
+}
+function denyWhatsapp(res, access) {
+  const code = access.reason === 'no_minutes' ? 'whatsapp_no_minutes' : 'whatsapp_locked';
+  const error = access.reason === 'check_failed'
+    ? 'Could not check your WhatsApp access right now. Try again in a moment.'
+    : (ACCESS_MESSAGES[access.reason] || ACCESS_MESSAGES.locked);
+  res.writeHead(access.reason === 'check_failed' ? 503 : 403, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error, code, access }));
+}
+
+// Call time is metered from the moment the call CONNECTS (not while it rings)
+// to the moment it ends, and charged once per call.
+const chargedCalls = new Set();
+async function chargeWhatsappMinutes(record) {
+  const uid = currentUserId();
+  if (!uid || isTestAuth() || record?.platform !== 'whatsapp' || !record.connectedAt) return;
+  const key = record.callId || record.id;
+  if (!key || chargedCalls.has(key)) return;
+  chargedCalls.add(key);
+  if (chargedCalls.size > 500) chargedCalls.delete(chargedCalls.values().next().value);
+  const minutes = Math.max(0, ((record.endedAt || Date.now()) - record.connectedAt) / 60000);
+  if (minutes <= 0) return;
+  try {
+    const { error } = await getServiceClient().rpc('whatsapp_add_minutes_used', { p_user: uid, p_minutes: Math.round(minutes * 100) / 100 });
+    if (error) throw error;
+    accessCache.delete(uid);
+    console.log(`[access] charged ${minutes.toFixed(2)} min to ${uid}`);
+  } catch (e) {
+    console.error(`[access] could not record ${minutes.toFixed(2)} min for ${uid}: ${e.message}`);
+  }
+}
+
+// A call on a limited allowance is ended when the minutes run out.
+const callLimitTimers = new Map(); // userId -> timeout
+function clearCallLimit() {
+  const uid = currentUserId();
+  if (uid && callLimitTimers.has(uid)) { clearTimeout(callLimitTimers.get(uid)); callLimitTimers.delete(uid); }
+}
+async function armCallLimit(call) {
+  const uid = currentUserId();
+  if (!uid || !call || call.platform !== 'whatsapp' || isTestAuth()) return;
+  clearCallLimit();
+  const access = await whatsappAccessFor(uid, { fresh: true });
+  if (!access.allowed || access.unlimited) return;
+  const ms = Math.max(1000, access.minutesRemaining * 60000);
+  const t = setTimeout(() => userContext.run({ userId: uid }, () => endCallForLimit(call.callId)), ms);
+  callLimitTimers.set(uid, t);
+  console.log(`[access] ${uid} has ${access.minutesRemaining} min: call ${call.callId} will end in ${Math.round(ms / 1000)}s`);
+}
+async function endCallForLimit(callId) {
+  const c = activeCall.v;
+  if (!c || (callId && c.callId !== callId)) return;
+  console.log(`[access] minutes used up - ending call ${c.callId}`);
+  try { if (c.provider === 'wacalls' && c.callId) await wacalls.endCall(c.callId); }
+  catch (e) { console.warn(`[access] could not end call ${c.callId}: ${e.message}`); }
+  broadcastMediaEvent({ type: 'call_state', state: 'ended', reason: 'minutes_used_up', call: c });
+  const sec = Math.round((Date.now() - c.startedAt) / 1000);
+  saveCallHistory({ ...c, status: 'ended', reason: 'minutes_used_up', duration: `${Math.floor(sec / 60)}m ${sec % 60}s`, endedAt: Date.now() });
+  activeCall.v = null;
+  stopWacallsStatePoll();
+}
+// The one place a call becomes "connected": stamps the time the meter starts.
+function markConnected(call) {
+  if (!call) return;
+  call.status = 'connected';
+  if (!call.connectedAt) { call.connectedAt = Date.now(); armCallLimit(call).catch(() => {}); }
+}
+
 let tgCallsStatePoll = null;
 
 // Polls tgcalls_bridge's real call state (idle/ringing/connecting/connected/
@@ -149,7 +305,7 @@ function startTgCallsStatePoll() {
     lastState = state;
 
     if (state === 'connected') {
-      if (activeCall.v) activeCall.v.status = 'connected';
+      if (activeCall.v) markConnected(activeCall.v);
       broadcastMediaEvent({ type: 'call_state', state: 'connected', call: activeCall.v });
     } else if (state === 'ringing' || state === 'connecting') {
       broadcastMediaEvent({ type: 'call_state', state, call: activeCall.v });
@@ -399,7 +555,7 @@ function startWacallsStatePoll() {
       activeCall.v.wacallsState = state;
       if (state === 'active') {
         if (activeCall.v.status !== 'connected') {
-          activeCall.v.status = 'connected';
+          markConnected(activeCall.v);
           console.log(`[WaCalls] call ${activeCall.v.callId} is ACTIVE - media ready`);
           broadcastMediaEvent({ type: 'call_state', state: 'connected', call: activeCall.v });
         }
@@ -515,7 +671,7 @@ function handleWacallsEvent(evt) {
   } else if (evt.kind === 'media-ready') {
     console.log(`[WaCalls] media READY for callId=${evt.callId || 'unknown'} (${evt.subtype})`);
     if (activeCall.v && (!evt.callId || activeCall.v.callId === evt.callId)) {
-      activeCall.v.status = 'connected';
+      markConnected(activeCall.v);
       if (evt.media) activeCall.v.media = evt.media;
       broadcastMediaEvent({ type: 'call_state', state: 'connected', call: activeCall.v });
     }
@@ -575,15 +731,29 @@ const server = http.createServer(async (req, res) => {
     // Everything here acts on the caller's OWN accounts and calls, so the
     // caller must be signed in and approved. From here on this request runs in
     // that user's context (their WhatsApp session, their active call).
-    let callerId = null;
+    let auth;
     try {
-      callerId = await authedApprovedUserId((req.headers.authorization || '').replace('Bearer ', ''));
-    } catch (e) { callerId = null; }
-    if (!callerId) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'Not signed in (or not approved yet)' }));
+      auth = await authCheck((req.headers.authorization || '').replace('Bearer ', ''));
+    } catch (e) {
+      console.error('[auth] unexpected: ' + e.message);
+      auth = { reason: 'check_failed' };
     }
+    if (!auth.userId) {
+      const f = AUTH_FAILURES[auth.reason] || AUTH_FAILURES.check_failed;
+      res.writeHead(f.status, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: f.error, code: auth.reason }));
+    }
+    const callerId = auth.userId;
     userContext.enterWith({ userId: callerId });
+
+    // WhatsApp connect lock: pairing, answering and placing WhatsApp calls need
+    // access. Status / disconnect / logout stay open so the screen can say WHY
+    // it is locked and a user can still unlink their own number.
+    const WA_GATED = new Set(['whatsapp/qr', 'whatsapp/call-config', 'wacalls/qr', 'wacalls/pair', 'wacalls/pair-phone', 'wacalls/call', 'wacalls/answer']);
+    if (WA_GATED.has(subpath)) {
+      const access = await whatsappAccessFor(callerId);
+      if (!access.allowed) return denyWhatsapp(res, access);
+    }
 
     // Overall status of connected accounts
     if (subpath === 'status' && req.method === 'GET') {
@@ -614,6 +784,7 @@ const server = http.createServer(async (req, res) => {
         whatsapp: waStatus,
         wacalls: wacallsStatus,
         telegram: tgStatus.data,
+        access: await whatsappAccessFor(callerId),
       }));
     }
 
@@ -988,6 +1159,8 @@ const server = http.createServer(async (req, res) => {
       // this selection layer must never do.
       let waProvider = null;
       if (platform === 'whatsapp') {
+        const callAccess = await whatsappAccessFor(callerId);
+        if (!callAccess.allowed) return denyWhatsapp(res, callAccess);
         waProvider = provider || 'greenapi';
         if (!WHATSAPP_PROVIDERS.includes(waProvider)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -1565,7 +1738,7 @@ wss.on('connection', async (ws, req) => {
         const msg = JSON.parse(data.toString());
         if (msg.type === 'call_ready') {
           if (activeCall.v) {
-            activeCall.v.status = 'connected';
+            markConnected(activeCall.v);
             broadcastMediaEvent({ type: 'call_state', state: 'connected', call: activeCall.v });
           }
         } else if (msg.type === 'vc_start') {

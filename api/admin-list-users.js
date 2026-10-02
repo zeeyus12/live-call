@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { evaluateAccess } from '../lib/whatsappAccess.js';
 
 export default async function handler(req, res) {
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -24,11 +25,16 @@ export default async function handler(req, res) {
 
   if (error) return res.status(500).json({ error: error.message });
 
-  const { data: settingsRows } = await supabase
-    .from('video_call_settings')
-    .select('user_id, anam_key_locked');
-  const lockedByUser = Object.fromEntries((settingsRows || []).map(r => [r.user_id, !!r.anam_key_locked]));
-  const users = data.map(u => ({ ...u, anam_key_locked: !!lockedByUser[u.user_id] }));
+  // WhatsApp access per user (sql/011). If the table has not been created yet
+  // the page still lists users; every user just shows as locked.
+  const { data: accessRows, error: accessErr } = await supabase
+    .from('whatsapp_access')
+    .select('user_id, unlocked, minutes_granted, minutes_used, plan, pro_until');
+  const accessByUser = Object.fromEntries((accessRows || []).map(r => [r.user_id, r]));
+  const users = data.map(u => ({
+    ...u,
+    whatsapp: evaluateAccess(accessByUser[u.user_id], { isAdmin: false }),
+  }));
 
-  return res.status(200).json({ users });
+  return res.status(200).json({ users, whatsappTableMissing: !!accessErr });
 }

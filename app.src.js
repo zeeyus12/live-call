@@ -3719,6 +3719,45 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // -------------------------------------------------------------
   // Connected Accounts in Profile
   // -------------------------------------------------------------
+  // WhatsApp access banner: locked / minutes left / Pro, or the real reason the
+  // server refused (expired session, not approved, server not configured).
+  // Pairing controls are disabled while locked - there is no point showing a
+  // QR the server will not issue.
+  const PRO_PRICE_LABEL = '₦15,000';
+  function renderWaAccess(access, errorText){
+    const tabs = $('waEngineWaCallsBtn')?.parentElement;
+    if (!tabs) return;
+    let box = $('waAccessBanner');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'waAccessBanner';
+      box.style.cssText = 'margin:0 0 12px;padding:12px 14px;border-radius:12px;font-size:13.5px;line-height:1.45;';
+      tabs.insertAdjacentElement('afterend', box);
+    }
+    let text = '', warn = false;
+    if (errorText) { text = errorText; warn = true; }
+    else if (access && !access.allowed) {
+      warn = true;
+      text = access.reason === 'no_minutes'
+        ? `You have used all your WhatsApp minutes. Ask the admin for more, or upgrade to Pro (${PRO_PRICE_LABEL}).`
+        : `WhatsApp calling is locked for your account. Ask the admin to open it for you, or upgrade to Pro (${PRO_PRICE_LABEL}).`;
+    }
+    else if (access && access.plan === 'pro') text = 'Pro: unlimited WhatsApp calling.';
+    else if (access && !access.unlimited && access.minutesRemaining != null) text = `WhatsApp minutes left: ${access.minutesRemaining}`;
+    box.textContent = text;
+    box.style.display = text ? 'block' : 'none';
+    box.style.background = warn ? 'rgba(224,164,88,0.14)' : 'rgba(37,211,102,0.12)';
+    box.style.border = warn ? '1px solid rgba(224,164,88,0.45)' : '1px solid rgba(37,211,102,0.35)';
+    box.style.color = warn ? '#f0c88a' : '#7be3a1';
+    const locked = !!(access && !access.allowed);
+    ['waRefreshQrBtn', 'waSessionPairBtn', 'waPhonePairBtn'].forEach((id) => {
+      const b = $(id);
+      if (b) { b.disabled = locked; b.style.opacity = locked ? '0.45' : ''; }
+    });
+    const qrBox = $('waQrBox');
+    if (qrBox && locked) qrBox.style.display = 'none';
+  }
+
   async function fetchConnectedStatus(){
     renderWaEngineUi();
     // Only the SELECTED engine is polled. The Green API route resolves the
@@ -3731,8 +3770,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
     try {
       const res = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/status', { headers: { ...(await authHeader()) } });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        renderWaAccess(null, err.error || `The server refused the request (${res.status}).`);
+        return;
+      }
       const data = await res.json();
+      renderWaAccess(data.access);
 
       if (waEngine() !== 'wacalls') {
         // WhatsApp status (Green API)
@@ -3826,6 +3870,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         headers: { ...(await authHeader()) },
       });
       const data = await r.json().catch(() => ({}));
+      if (data.access || String(data.code || '').startsWith('whatsapp_')) renderWaAccess(data.access);
       if (data.dataUrl && img) {
         img.src = data.dataUrl;
         img.style.display = 'block';
