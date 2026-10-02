@@ -3398,7 +3398,35 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // (now invisible) prepErrorHint and hanging up immediately, as this used
   // to do, meant every failure looked like a silent crash back to Home with
   // no explanation anywhere.
+  // Why the last call ended (set by whatever ended it), shown as a toast once the
+  // call screen has closed - the on-screen label used to vanish with the screen.
+  let lastEndReason = '';
+  function noteEndReason(r){ if (r) lastEndReason = String(r); }
+  function showEndToast(text){
+    let t = $('callEndToast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = 'callEndToast';
+      t.style.cssText = 'position:fixed; left:12px; right:12px; top:calc(env(safe-area-inset-top, 0px) + 12px); z-index:99999; background:#2b1214; color:#ffb4ab; border:1px solid #7a2a2a; border-radius:14px; padding:12px 14px; font-size:13.5px; line-height:1.4; box-shadow:0 8px 28px rgba(0,0,0,0.5);';
+      t.addEventListener('click', () => { t.style.display = 'none'; });
+      document.body.appendChild(t);
+    }
+    t.textContent = text;
+    t.style.display = 'block';
+    clearTimeout(t._hide);
+    t._hide = setTimeout(() => { t.style.display = 'none'; }, 15000);
+  }
+  function endReasonText(reason){
+    const r = String(reason || '').toLowerCase();
+    if (r === 'browser_media_failed') return 'the connection between this app and the call server dropped (media link failed)';
+    if (r === 'declined' || r === 'reject' || r === 'rejected') return 'the other person declined';
+    if (r === 'busy') return 'the other person is busy';
+    if (r === 'timeout' || r === 'no_answer' || r === 'unanswered') return 'nobody answered';
+    if (r === 'user_ended' || r === 'ended' || r === 'remote_ended' || r === 'hangup') return 'the other side hung up';
+    return reason ? String(reason) : 'unknown reason';
+  }
   function showCallFailureAndEnd(message){
+    noteEndReason(message);
     stopRingback();
     if ($('socialCallScreen')?.classList.contains('active')) {
       const lbl = $('socialCallStatusLabel');
@@ -3672,7 +3700,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       case 'ended':
         console.log(`[WaCalls] call ended (${evt.reason || 'ended'})`);
         hideIncomingWaCallsCall();
-        if ($('socialCallScreen')?.classList.contains('active')) endSocialCall();
+        if ($('socialCallScreen')?.classList.contains('active')) {
+          // Not ended by the End button (that closes the screen first), so say why.
+          noteEndReason('Call ended: ' + endReasonText(evt.reason));
+          endSocialCall();
+        }
         return;
       case 'error':
         console.warn(`[WaCalls] ${evt.error}`);
@@ -5035,17 +5067,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           if (cancelled()) return;
           if (voice) WaCallsMediaLeg.attachOutgoingAudio(voice);
           else console.warn('[WaCalls] the avatar produced no audio track - the callee will not hear it');
-          setStatus('Connected');
         }
       };
-      if (avatarOnWaCalls) {
-        // Start the avatar when the callee answers, not before.
-        onCallAnswered = () => {
-          startAvatar().catch((e) => { if (!cancelled()) showCallFailureAndEnd(e.message || 'Could not start the avatar'); });
-        };
-      } else {
-        await startAvatar();
-      }
+      // The avatar is up and ready BEFORE the call is placed, so it is already
+      // there when the callee picks up (it stays silent until they speak - the
+      // persona is created with skipGreeting).
+      await startAvatar();
+      if (cancelled()) return;
 
       setStatus('Calling…');
       // Place call on backend bridge
@@ -5298,6 +5326,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
     // Update Recent calls list with new record
     renderRecent();
+    if (lastEndReason) { showEndToast(lastEndReason); lastEndReason = ''; }
   }
 
   // Initial fetch of connected account statuses, and make both avatar-source

@@ -34,4 +34,8 @@ assert.ok(app.includes("typeof model.fps === 'number'"));
 assert.ok(app.includes('recoverAvatar(why)') && app.includes('anamCloseReason'));
 assert.ok(!/CONNECTION_CLOSED, \(\) => \{[^}]*endSocialCall\(\);\s*\}\);/.test(app), 'Anam close handler must not unconditionally end the call');
 assert.ok(app.includes('startSilence()') && app.includes("this.ctx.fillStyle = '#101010'"));
+// Avatar joins BEFORE the callee: it is started before the call is placed, not on answer.
+assert.ok(!/onCallAnswered = \(\) => \{\s*startAvatar/.test(app), 'avatar must not be deferred to the answer');
+assert.ok(/await startAvatar\(\);\s*if \(cancelled\(\)\) return;\s*setStatus\('Calling…'\)/.test(app));
+assert.ok(app.includes('showEndToast(lastEndReason)') && app.includes('browser_media_failed'));
 console.log('provider-wiring: all checks passed');
