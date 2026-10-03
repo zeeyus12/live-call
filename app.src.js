@@ -5102,40 +5102,28 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // swap of your own camera) or an Anam AI avatar.
       const startAvatar = async () => {
         setStatus('Starting avatar…');
-        try {
-          await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
-        } catch (firstErr) {
-          if (cancelled()) return;
-          // A plan limit is not a glitch: retrying only opens a second session
-          // attempt and fails the same way. Say what it is and stop.
-          if (isPlanLimitError(firstErr)) {
+        // Up to 3 tries. A concurrency error usually means the previous session (this call's own
+        // failed first try, or the last call) is still closing on Anam's side: wait longer, then retry.
+        let lastErr = null;
+        for (let i = 0; i < 3; i++) {
+          try {
+            await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
+            lastErr = null;
+            break;
+          } catch (err) {
+            lastErr = err;
+            if (cancelled()) return;
+            console.warn(`[avatar] start attempt ${i + 1} failed:`, err && err.message);
             try { activeSocialSource().stop(); } catch(e){}
-            // The previous session may still be closing on Anam's side: if one was stopped moments ago, wait and retry once.
-            if (selectedCallSource === 'avatar' && Date.now() - SocialAnamSource.lastStopAt < 30000) {
-              setStatus('Waiting for the previous avatar session to close…');
-              await new Promise(r => setTimeout(r, 5000));
-              if (cancelled()) return;
-              try {
-                await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
-                if (cancelled()) { try { activeSocialSource().stop(); } catch(e){} return; }
-                if (avatarOnWaCalls) {
-                  const v = await waitForAvatarAudio(8000);
-                  if (cancelled()) return;
-                  if (v) WaCallsMediaLeg.attachOutgoingAudio(v);
-                }
-                return;
-              } catch (e2) {
-                try { activeSocialSource().stop(); } catch(e){}
-                throw new Error(isPlanLimitError(e2) ? planLimitMessage(e2) : (e2 && e2.message || e2));
-              }
-            }
-            throw new Error(planLimitMessage(firstErr));
+            if (i === 2) break;
+            const limit = isPlanLimitError(err);
+            if (limit && selectedCallSource !== 'avatar') break;
+            setStatus(limit ? 'Waiting for the previous avatar session to close…' : 'Restarting the avatar…');
+            await new Promise(r => setTimeout(r, limit ? 6000 : 600));
+            if (cancelled()) return;
           }
-          console.warn('[avatar] first start failed, retrying once:', firstErr && firstErr.message);
-          try { activeSocialSource().stop(); } catch(e){}
-          await new Promise(r => setTimeout(r, 600));
-          await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
         }
+        if (lastErr) throw (isPlanLimitError(lastErr) ? new Error(planLimitMessage(lastErr)) : lastErr);
         if (cancelled()) { try { activeSocialSource().stop(); } catch(e){} return; }
         if (avatarOnWaCalls) {
           const voice = await waitForAvatarAudio(8000);
