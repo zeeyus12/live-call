@@ -2044,6 +2044,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     async start(){
       const gen = ++this.gen;
       const stale = () => gen !== this.gen;
+      if (this.client) { try { await this.client.stopStreaming(); } catch(e){} this.client = null; }
+      if (anamClient) { try { await anamClient.stopStreaming(); } catch(e){} anamClient = null; }
+      if (this.closing) { await Promise.race([this.closing, new Promise(r => setTimeout(r, 3000))]); this.closing = null; }
+      if (stale()) return;
       // In a WaCalls avatar call this is the callee's voice; otherwise null and
       // the SDK behaves exactly as before (its own microphone).
       const calleeStream = CalleeAudioBus.stream();
@@ -2100,9 +2104,21 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // with the caller's own face (and light the camera indicator). The PIP
       // now carries the PERSON BEING CALLED - see PeerMediaPlayout.attachToPip.
     },
+    lastStopAt: 0,
+    closing: null,
     stop(){
       this.gen++;
-      if (this.client) { try { this.client.stopStreaming(); } catch(e){} this.client = null; }
+      const c = this.client; this.client = null;
+      if (c) {
+        this.lastStopAt = Date.now();
+        // stopStreaming() is async: keep the promise so the next start() can wait for Anam to free the session.
+        try { this.closing = Promise.resolve(c.stopStreaming()).catch(() => {}); } catch(e){ this.closing = null; }
+      }
+      try {
+        const so = this.videoEl && this.videoEl.srcObject;
+        if (so && so.getTracks) so.getTracks().forEach(t => { try { t.stop(); } catch(_){} });
+        if (this.videoEl) this.videoEl.srcObject = null;
+      } catch(_){}
       if (this.videoEl) { this.videoEl.style.display = 'none'; }
       const ph = $('prepAvatarPlaceholder');
       if (ph) ph.style.display = 'block';
@@ -5094,6 +5110,25 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           // attempt and fails the same way. Say what it is and stop.
           if (isPlanLimitError(firstErr)) {
             try { activeSocialSource().stop(); } catch(e){}
+            // The previous session may still be closing on Anam's side: if one was stopped moments ago, wait and retry once.
+            if (selectedCallSource === 'avatar' && Date.now() - SocialAnamSource.lastStopAt < 30000) {
+              setStatus('Waiting for the previous avatar session to close…');
+              await new Promise(r => setTimeout(r, 5000));
+              if (cancelled()) return;
+              try {
+                await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
+                if (cancelled()) { try { activeSocialSource().stop(); } catch(e){} return; }
+                if (avatarOnWaCalls) {
+                  const v = await waitForAvatarAudio(8000);
+                  if (cancelled()) return;
+                  if (v) WaCallsMediaLeg.attachOutgoingAudio(v);
+                }
+                return;
+              } catch (e2) {
+                try { activeSocialSource().stop(); } catch(e){}
+                throw new Error(isPlanLimitError(e2) ? planLimitMessage(e2) : (e2 && e2.message || e2));
+              }
+            }
             throw new Error(planLimitMessage(firstErr));
           }
           console.warn('[avatar] first start failed, retrying once:', firstErr && firstErr.message);
