@@ -1241,9 +1241,18 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   }
 
   const LANGUAGE_NAMES = { en:'English', es:'Spanish', fr:'French', pt:'Portuguese', de:'German', ha:'Hausa', yo:'Yoruba', ig:'Igbo', sw:'Swahili', ar:'Arabic', hi:'Hindi', zh:'Chinese' };
+  // Tells the avatar it is on a real phone call and who is who. Without this it treated the brief as
+  // something the person speaking had just said, and asked them whether to carry it out.
+  let socialCallContext = '';
+  function setSocialCallContext(direction, platform, name){
+    const where = platform === 'whatsapp' ? 'WhatsApp video call' : 'video call';
+    const who = name ? `"${name}"` : 'the other person';
+    socialCallContext = `# Right now\nYou are live on a real ${where}, speaking out loud. ${direction === 'incoming' ? `${who} called you and you just picked up.` : `You placed this call to ${who} and they have just picked up.`} The person you hear is ${who}, not whoever wrote the brief below. The brief is your own private instructions: carry them out yourself, never read them out, and never ask the person you are speaking to whether you should do what the brief says or whether you may start. You only hear them; you cannot see them. When they greet you, greet back and move straight into the purpose of the call in a natural way.`;
+  }
   function promptWithLanguage(){
-    if (!state.language || state.language === 'en') return state.systemPrompt;
-    return `Speak only in ${LANGUAGE_NAMES[state.language] || state.language} for this entire call, regardless of what language the brief below is written in. ${state.systemPrompt}`;
+    const ctx = socialCallContext ? socialCallContext + '\n\n' : '';
+    if (!state.language || state.language === 'en') return ctx + state.systemPrompt;
+    return ctx + `Speak only in ${LANGUAGE_NAMES[state.language] || state.language} for this entire call, regardless of what language the brief below is written in. ${state.systemPrompt}`;
   }
 
   function endCall(){
@@ -2023,6 +2032,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // its own client/video element, separate from callScreen's own anamClient/
   // remoteVideo, so starting a social avatar call can never interfere with
   // the regular AI-avatar call screen (which stays exactly as it was).
+  // Draws a video into a canvas the way CSS object-fit:cover would: fills the whole canvas,
+  // keeps the picture's proportions and crops the overflow (no stretching).
+  function drawCover(ctx, vid, cw, ch){
+    const vw = vid.videoWidth, vh = vid.videoHeight;
+    if (!vw || !vh) { ctx.drawImage(vid, 0, 0, cw, ch); return; }
+    const scale = Math.max(cw / vw, ch / vh);
+    const sw = cw / scale, sh = ch / scale;
+    ctx.drawImage(vid, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, cw, ch);
+  }
   // Asks the server to force-end every running Anam session (Anam's own stop-session API),
   // instead of trusting the browser's WebRTC close to be noticed quickly.
   let anamAuthCache = null, anamStopPromise = null;
@@ -3130,6 +3148,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     encodeFrame(){
       if (!this.active || !this.encoder || this.encoder.state !== 'configured') return;
       if (!this.videoDC || this.videoDC.readyState !== 'open') return;
+      // Never let frames queue up: a backed-up send buffer or encoder is what makes the callee's
+      // video lag further and further behind. Drop this frame and send the next fresh one instead.
+      if (this.videoDC.bufferedAmount > 128 * 1024) return;
+      if (this.encoder.encodeQueueSize > 2) return;
       const vid = this.avatarSource().getVideoElement() || $('socialRemoteVideo');
       const avatarLive = !!(vid && (vid.videoWidth || vid.readyState >= 2));
       if (!avatarLive) {
@@ -3143,7 +3165,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         } catch (e) { return; }
       } else {
         try {
-          this.ctx.drawImage(vid, 0, 0, this.canvas.width, this.canvas.height);
+          drawCover(this.ctx, vid, this.canvas.width, this.canvas.height);
         } catch (e) {
           return; // frame not decoded yet / cross-origin - try the next tick
         }
@@ -3401,7 +3423,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       this.frameTimer = setInterval(() => {
         if (!this.active || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
         if (vid && (vid.videoWidth || vid.readyState >= 2)) {
-          ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+          drawCover(ctx, vid, canvas.width, canvas.height);
           canvas.toBlob((blob) => {
             if (!blob || !this.active || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
             blob.arrayBuffer().then((buf) => {
@@ -3582,6 +3604,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     currentSocialPlatform = 'whatsapp';
     currentCallEngine = 'wacalls';
     selectedSocialContact = { name: call.peer, target: call.peer };
+    setSocialCallContext('incoming', 'whatsapp', call.peer);
 
     const avatarAnswer = selectedCallSource === 'avatar';
     avatarRecoveries = 0; avatarRecovering = false;
@@ -5122,6 +5145,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // read again at hangup, so switching engines mid-call can't send the
       // teardown to the wrong backend.
       currentCallEngine = currentSocialPlatform === 'whatsapp' ? waEngine() : null;
+      setSocialCallContext('outgoing', currentSocialPlatform, selectedSocialContact && (selectedSocialContact.name || ''));
 
       // The call screen (with its End button) comes up FIRST, before anything
       // slow. It used to appear only after the avatar had started, the call
@@ -5166,7 +5190,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         if (lastErr) throw (isPlanLimitError(lastErr) ? new Error(planLimitMessage(lastErr)) : lastErr);
         if (cancelled()) { try { activeSocialSource().stop(); } catch(e){} return; }
         if (avatarOnWaCalls) {
-          const voice = await waitForAvatarAudio(8000);
+          const voice = await waitForAvatarAudio(30000);
           if (cancelled()) return;
           if (voice) WaCallsMediaLeg.attachOutgoingAudio(voice);
           else console.warn('[WaCalls] the avatar produced no audio track - the callee will not hear it');
@@ -5405,6 +5429,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     callAttemptSeq++; // cancels a placeSocialCall() that is still setting up
     clearInterval(socialCallDurationTimer); socialCallDurationTimer = null;
     stopRingback();
+    socialCallContext = '';
     // Only the engine that carried THIS call is torn down: Green API's browser
     // client hangs up client-side, WaCalls ends the call server-side through
     // /api/social-call/hangup further down (which deletes it on WaCalls).
