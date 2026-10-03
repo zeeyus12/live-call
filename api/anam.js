@@ -184,6 +184,36 @@ export default async function handler(req, res) {
       });
       if (r.status === 204 || r.ok) return res.status(200).json({ deleted: true });
       const { data } = await parseJsonSafe(r);
+
+      // Anam refuses to hard-delete an avatar that personas still use. Move those
+      // personas to another avatar (or remove them if there is none), then retry once.
+      const impacted = data?.impactedPersonaIds || data?.error?.impactedPersonaIds;
+      if (type === 'avatar' && Array.isArray(impacted) && impacted.length) {
+        let fallbackId = null;
+        try {
+          const lr = await fetch('https://api.anam.ai/v1/avatars', { headers: authHeaders });
+          const { data: ld } = await parseJsonSafe(lr);
+          const list = Array.isArray(ld?.data) ? ld.data : (Array.isArray(ld?.avatars) ? ld.avatars : (Array.isArray(ld) ? ld : []));
+          fallbackId = (list.find(a => a.id !== id) || {}).id || null;
+        } catch (_) {}
+        for (const pid of impacted) {
+          const pr = fallbackId
+            ? await fetch(`https://api.anam.ai/v1/personas/${pid}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', ...authHeaders },
+                body: JSON.stringify({ avatarId: fallbackId }),
+              })
+            : await fetch(`https://api.anam.ai/v1/personas/${pid}`, { method: 'DELETE', headers: authHeaders });
+          if (!pr.ok) {
+            const { data: pd } = await parseJsonSafe(pr);
+            return res.status(pr.status).json({ error: pd || `Could not move persona ${pid} (status ${pr.status})` });
+          }
+        }
+        const r2 = await fetch(`https://api.anam.ai/v1/${resource}/${id}?hard=true`, { method: 'DELETE', headers: authHeaders });
+        if (r2.status === 204 || r2.ok) return res.status(200).json({ deleted: true });
+        const { data: d2 } = await parseJsonSafe(r2);
+        return res.status(r2.status).json({ error: d2 || `Delete failed (status ${r2.status})` });
+      }
       return res.status(r.status).json({ error: data || `Delete failed (status ${r.status})` });
     } catch (err) {
       return res.status(500).json({ error: String(err) });

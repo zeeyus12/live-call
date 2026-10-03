@@ -858,6 +858,19 @@
           <span class="dot live" id="prepLucyDot"></span>
         </div>
 
+        <div class="profileCard" id="prepLfImageCard" style="margin-bottom:10px;">
+          <div class="cIcon">
+            <svg viewBox="0 0 24 24" fill="none" width="20" height="20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+          </div>
+          <div class="cBody">
+            <div class="cLabel">Reference photo</div>
+            <div class="cValue" id="prepLfImageStatus">Add a photo to use in this call</div>
+          </div>
+          <button class="miniActionBtn" id="openPrepLfImage">Upload</button>
+          <input type="file" id="prepLfImageInput" accept="image/png,image/jpeg,image/webp" style="display:none;" />
+        </div>
+        <img id="prepLfImagePreview" style="display:none; width:100%; max-width:220px; border-radius:14px; margin:0 0 10px; border:1px solid var(--line);" />
+
         <!-- Realtime RVC voice conversion. Lucy 2.5 only: it supplies the
              avatar video and no voice, so the audio that goes out with it is
              converted here. Hidden entirely for the Anam avatar source. -->

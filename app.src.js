@@ -559,7 +559,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       btn.textContent = originalText; btn.disabled = false;
     }
   }
-  $('saveAnamKey')?.addEventListener('click', () => saveProviderKey('anam', 'anamApiKey', 'saveAnamKey', () => { loadAnamAvatars(); loadAnamVoices(); }));
+  $('saveAnamKey')?.addEventListener('click', () => saveProviderKey('anam', 'anamApiKey', 'saveAnamKey', async () => {
+    state.anamAvatarId = ''; state.anamAvatarName = '';
+    state.anamVoiceId = ''; state.anamVoiceName = '';
+    await persist();
+    updateAnamAvatarSummary();
+    loadAnamAvatars(); loadAnamVoices();
+  }));
   $('saveFalKey')?.addEventListener('click', () => saveProviderKey('fal', 'falApiKey', 'saveFalKey', () => updateLfKeyHint()));
   $('saveDecartKey')?.addEventListener('click', () => saveProviderKey('decart', 'decartApiKey', 'saveDecartKey', () => updateLfKeyHint()));
   $('lucyProviderSelect')?.addEventListener('change', (e) => { try { localStorage.setItem('lucyProvider', e.target.value); } catch(_){} updateLfKeyHint(); });
@@ -1373,11 +1379,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   }
 
   $('openLfImageUpload')?.addEventListener('click', () => $('lfImageInput').click());
-  $('lfImageInput')?.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    e.target.value = '';
-    if (!file) return;
-    const statusEl = $('lfImageStatus');
+  async function uploadLfReference(file, statusEl, previewEl){
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
       statusEl.textContent = 'Use a PNG, JPEG, or WEBP photo.'; return;
     }
@@ -1393,8 +1395,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const { data: pub } = supabase.storage.from('user-uploads').getPublicUrl(path);
       lfReferenceImageUrl = pub.publicUrl;
       lfReferenceDescription = '';
-      $('lfImagePreview').src = lfReferenceImageUrl;
-      $('lfImagePreview').style.display = 'block';
+      for (const el of [$('lfImagePreview'), previewEl]) { if (el) { el.src = lfReferenceImageUrl; el.style.display = 'block'; } }
+      for (const el of [$('lfImageStatus'), statusEl]) { if (el && el !== statusEl) el.textContent = 'Reference photo ready'; }
 
       // Auto-describe the photo so the person never has to type a prompt -
       // Decart's docs say resemblance is weak without a literal description
@@ -1428,6 +1430,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     } catch (e) {
       statusEl.textContent = 'Upload failed: ' + (e.message || e);
     }
+  }
+  $('lfImageInput')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0]; e.target.value = '';
+    if (file) uploadLfReference(file, $('lfImageStatus'), null);
+  });
+  $('openPrepLfImage')?.addEventListener('click', () => $('prepLfImageInput').click());
+  $('prepLfImageInput')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0]; e.target.value = '';
+    if (file) uploadLfReference(file, $('prepLfImageStatus'), $('prepLfImagePreview'));
   });
 
   const lfCallScreen = $('lfCallScreen'), lfIdle = $('lfIdle'), lfStatus = $('lfStatus'), lfBottom = $('lfBottom');
@@ -2268,6 +2279,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // hidden for the Anam avatar source, which already has a voice.
       const lucy = selectedCallSource === 'lucy';
       card.style.display = lucy ? '' : 'none';
+      const picCard = $('prepLfImageCard'); if (picCard) picCard.style.display = lucy ? '' : 'none';
       if (modelCard) modelCard.style.display = 'none';
       if (hintEl) hintEl.style.display = 'none';
       if (!lucy) return;
@@ -5434,6 +5446,16 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       $('authBox').style.display = 'none';
       $('pendingBox').style.display = 'block';
       splashAuthDone = true; maybeHideSplash();
+      try {
+        const k = 'signupNotified:' + user.id;
+        if (!localStorage.getItem(k)) {
+          fetch('/api/save-push-subscription', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+            body: JSON.stringify({ action: 'notify-signup' }),
+          }).then(r => { if (r.ok) localStorage.setItem(k, '1'); }).catch(() => {});
+        }
+      } catch (_) {}
       return;
     }
     $('authBoot').style.display = 'none';
