@@ -177,45 +177,49 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'type=avatar|voice and id are required' });
     }
     const resource = type === 'avatar' ? 'avatars' : 'voices';
+    const idField = type === 'avatar' ? 'avatarId' : 'voiceId';
+    const del = () => fetch(`https://api.anam.ai/v1/${resource}/${id}?hard=true`, { method: 'DELETE', headers: authHeaders });
+    const listIds = async () => {
+      const lr = await fetch(`https://api.anam.ai/v1/${resource}`, { headers: authHeaders });
+      const { data: ld } = await parseJsonSafe(lr);
+      const list = Array.isArray(ld?.data) ? ld.data : (Array.isArray(ld?.[resource]) ? ld[resource] : (Array.isArray(ld) ? ld : []));
+      return lr.ok ? list.map(x => x.id) : null;
+    };
+    // Anam sometimes deletes and still answers with an error: if it is gone, that is a success.
+    const goneNow = async () => { try { const ids = await listIds(); return !!ids && !ids.includes(id); } catch (_) { return false; } };
     try {
-      const r = await fetch(`https://api.anam.ai/v1/${resource}/${id}?hard=true`, {
-        method: 'DELETE',
-        headers: authHeaders,
-      });
-      if (r.status === 204 || r.ok) return res.status(200).json({ deleted: true });
-      const { data } = await parseJsonSafe(r);
+      let r = await del();
+      if (r.ok || r.status === 404) return res.status(200).json({ deleted: true });
+      let { data } = await parseJsonSafe(r);
 
-      // Anam refuses to hard-delete an avatar that personas still use. Move those
-      // personas to another avatar (or remove them if there is none), then retry once.
+      // Anam refuses to hard-delete an avatar/voice that personas still use. Move those
+      // personas to another one (or remove them if there is none), then retry once.
       const impacted = data?.impactedPersonaIds || data?.error?.impactedPersonaIds;
-      if (type === 'avatar' && Array.isArray(impacted) && impacted.length) {
-        let fallbackId = null;
-        try {
-          const lr = await fetch('https://api.anam.ai/v1/avatars', { headers: authHeaders });
-          const { data: ld } = await parseJsonSafe(lr);
-          const list = Array.isArray(ld?.data) ? ld.data : (Array.isArray(ld?.avatars) ? ld.avatars : (Array.isArray(ld) ? ld : []));
-          fallbackId = (list.find(a => a.id !== id) || {}).id || null;
-        } catch (_) {}
+      if (Array.isArray(impacted) && impacted.length) {
+        const ids = (await listIds().catch(() => null)) || [];
+        const fallbackId = ids.find(x => x !== id) || null;
         for (const pid of impacted) {
           const pr = fallbackId
             ? await fetch(`https://api.anam.ai/v1/personas/${pid}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json', ...authHeaders },
-                body: JSON.stringify({ avatarId: fallbackId }),
+                body: JSON.stringify({ [idField]: fallbackId }),
               })
             : await fetch(`https://api.anam.ai/v1/personas/${pid}`, { method: 'DELETE', headers: authHeaders });
-          if (!pr.ok) {
+          if (!pr.ok && pr.status !== 404) {
+            if (await goneNow()) return res.status(200).json({ deleted: true });
             const { data: pd } = await parseJsonSafe(pr);
             return res.status(pr.status).json({ error: pd || `Could not move persona ${pid} (status ${pr.status})` });
           }
         }
-        const r2 = await fetch(`https://api.anam.ai/v1/${resource}/${id}?hard=true`, { method: 'DELETE', headers: authHeaders });
-        if (r2.status === 204 || r2.ok) return res.status(200).json({ deleted: true });
-        const { data: d2 } = await parseJsonSafe(r2);
-        return res.status(r2.status).json({ error: d2 || `Delete failed (status ${r2.status})` });
+        r = await del();
+        if (r.ok || r.status === 404) return res.status(200).json({ deleted: true });
+        ({ data } = await parseJsonSafe(r));
       }
+      if (await goneNow()) return res.status(200).json({ deleted: true });
       return res.status(r.status).json({ error: data || `Delete failed (status ${r.status})` });
     } catch (err) {
+      if (await goneNow()) return res.status(200).json({ deleted: true });
       return res.status(500).json({ error: String(err) });
     }
   }
