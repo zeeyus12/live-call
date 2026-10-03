@@ -2023,6 +2023,24 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // its own client/video element, separate from callScreen's own anamClient/
   // remoteVideo, so starting a social avatar call can never interfere with
   // the regular AI-avatar call screen (which stays exactly as it was).
+  // Asks the server to force-end every running Anam session (Anam's own stop-session API),
+  // instead of trusting the browser's WebRTC close to be noticed quickly.
+  let anamAuthCache = null, anamStopPromise = null;
+  function stopAnamSessions({ keepalive = false } = {}){
+    const run = async () => {
+      try {
+        const h = keepalive && anamAuthCache ? anamAuthCache : await authHeader();
+        anamAuthCache = h;
+        await fetch('/api/anam', {
+          method: 'POST', keepalive,
+          headers: { 'Content-Type': 'application/json', ...h },
+          body: JSON.stringify({ action: 'stop-active' }),
+        });
+      } catch(e){ console.warn('[avatar] stop-active failed:', e && e.message); }
+    };
+    anamStopPromise = run();
+    return anamStopPromise;
+  }
   const SocialAnamSource = {
     client: null,
     videoEl: null,
@@ -2046,7 +2064,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const stale = () => gen !== this.gen;
       if (this.client) { try { await this.client.stopStreaming(); } catch(e){} this.client = null; }
       if (anamClient) { try { await anamClient.stopStreaming(); } catch(e){} anamClient = null; }
-      if (this.closing) { await Promise.race([this.closing, new Promise(r => setTimeout(r, 3000))]); this.closing = null; }
+      if (this.closing) { await Promise.race([this.closing, new Promise(r => setTimeout(r, 4000))]); this.closing = null; }
+      // Clear anything still running on the account (leftovers of earlier calls) before opening a new session.
+      if (anamStopPromise) await Promise.race([anamStopPromise, new Promise(r => setTimeout(r, 4000))]);
+      await Promise.race([stopAnamSessions(), new Promise(r => setTimeout(r, 4000))]);
+      if (stale()) return;
       if (stale()) return;
       // In a WaCalls avatar call this is the callee's voice; otherwise null and
       // the SDK behaves exactly as before (its own microphone).
@@ -2113,6 +2135,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         this.lastStopAt = Date.now();
         // stopStreaming() is async: keep the promise so the next start() can wait for Anam to free the session.
         try { this.closing = Promise.resolve(c.stopStreaming()).catch(() => {}); } catch(e){ this.closing = null; }
+        this.closing = Promise.resolve(this.closing).then(() => stopAnamSessions());
       }
       try {
         const so = this.videoEl && this.videoEl.srcObject;
@@ -5387,6 +5410,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     SocialCallMediaAdapter.stop();
     LiveSwapMediaSource.stop();
     SocialAnamSource.stop();
+    stopAnamSessions(); // also force-end server-side, right now
     PeerMediaPlayout.stop();
     onCallAnswered = null;
     CalleeAudioBus.stop();
@@ -5411,6 +5435,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   window.addEventListener('pagehide', () => {
     try { SocialAnamSource.stop(); } catch(e){}
     try { if (anamClient) anamClient.stopStreaming(); } catch(e){}
+    try { stopAnamSessions({ keepalive: true }); } catch(e){}
   });
 
   // Initial fetch of connected account statuses, and make both avatar-source

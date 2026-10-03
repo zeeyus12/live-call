@@ -105,6 +105,25 @@ export default async function handler(req, res) {
       }
     }
 
+    // Force-ends every running Anam session on this user's account (Anam's own
+    // POST /v1/sessions/{id}/stop), so a call that ended never keeps counting
+    // against the one-session limit while Anam waits for its idle timeout.
+    if (action === 'stop-active') {
+      try {
+        const lr = await fetch('https://api.anam.ai/v1/sessions?active=true&perPage=100', { headers: authHeaders });
+        const { data } = await parseJsonSafe(lr);
+        if (!lr.ok) return res.status(lr.status).json({ error: data || 'Could not list sessions' });
+        const list = (Array.isArray(data?.data) ? data.data : []).filter(x => x && x.id && !x.endTime);
+        const results = await Promise.all(list.map(async (x) => {
+          try { const sr = await fetch(`https://api.anam.ai/v1/sessions/${x.id}/stop`, { method: 'POST', headers: authHeaders }); return sr.ok || sr.status === 404; }
+          catch (_) { return false; }
+        }));
+        return res.status(200).json({ found: list.length, stopped: results.filter(Boolean).length });
+      } catch (err) {
+        return res.status(500).json({ error: String(err) });
+      }
+    }
+
     if (action === 'upload-avatar') {
       const { imageUrl, displayName } = req.body || {};
       if (!imageUrl) return res.status(400).json({ error: 'imageUrl is required' });
