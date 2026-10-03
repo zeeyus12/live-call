@@ -124,6 +124,18 @@ export default async function handler(req, res) {
       }
     }
 
+    // Force-ends ONE session (the one this browser just opened), nothing else.
+    if (action === 'stop-session') {
+      const { sessionId } = req.body || {};
+      if (!sessionId || !/^[0-9a-fA-F-]{8,64}$/.test(sessionId)) return res.status(400).json({ error: 'sessionId is required' });
+      try {
+        const sr = await fetch(`https://api.anam.ai/v1/sessions/${sessionId}/stop`, { method: 'POST', headers: authHeaders });
+        return res.status(200).json({ stopped: sr.ok || sr.status === 404 });
+      } catch (err) {
+        return res.status(500).json({ error: String(err) });
+      }
+    }
+
     if (action === 'upload-avatar') {
       const { imageUrl, displayName } = req.body || {};
       if (!imageUrl) return res.status(400).json({ error: 'imageUrl is required' });

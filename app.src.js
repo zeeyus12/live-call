@@ -2041,6 +2041,17 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     anamStopPromise = run();
     return anamStopPromise;
   }
+  async function stopAnamSession(sessionId){
+    if (!sessionId) return;
+    try {
+      const h = anamAuthCache || await authHeader();
+      await fetch('/api/anam', {
+        method: 'POST', keepalive: true,
+        headers: { 'Content-Type': 'application/json', ...h },
+        body: JSON.stringify({ action: 'stop-session', sessionId }),
+      });
+    } catch(e){ console.warn('[avatar] stop-session failed:', e && e.message); }
+  }
   const SocialAnamSource = {
     client: null,
     videoEl: null,
@@ -2119,7 +2130,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       });
       try { client.addListener(AnamEvent.SERVER_WARNING, (m) => console.warn('[avatar] Anam server warning:', m)); } catch(_){}
       await client.streamToVideoElement('prepAvatarPreview', calleeStream || undefined);
-      if (stale()) { try { client.stopStreaming(); } catch(e){} return; }
+      if (stale()) {
+        let sid = null; try { sid = client.getActiveSessionId && client.getActiveSessionId(); } catch(_){}
+        try { client.stopStreaming(); } catch(e){}
+        stopAnamSession(sid);
+        return;
+      }
 
       // NOTE: no getUserMedia({video}) here any more. Avatar mode never needs
       // the caller's camera; it used to be opened only to fill the small PIP
@@ -2135,7 +2151,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         this.lastStopAt = Date.now();
         // stopStreaming() is async: keep the promise so the next start() can wait for Anam to free the session.
         try { this.closing = Promise.resolve(c.stopStreaming()).catch(() => {}); } catch(e){ this.closing = null; }
-        this.closing = Promise.resolve(this.closing).then(() => stopAnamSessions());
+        let sid = null; try { sid = c.getActiveSessionId && c.getActiveSessionId(); } catch(_){}
+        if (sid) this.closing = Promise.all([this.closing, stopAnamSession(sid)]);
       }
       try {
         const so = this.videoEl && this.videoEl.srcObject;
@@ -5410,7 +5427,6 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     SocialCallMediaAdapter.stop();
     LiveSwapMediaSource.stop();
     SocialAnamSource.stop();
-    stopAnamSessions(); // also force-end server-side, right now
     PeerMediaPlayout.stop();
     onCallAnswered = null;
     CalleeAudioBus.stop();
@@ -5435,7 +5451,6 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   window.addEventListener('pagehide', () => {
     try { SocialAnamSource.stop(); } catch(e){}
     try { if (anamClient) anamClient.stopStreaming(); } catch(e){}
-    try { stopAnamSessions({ keepalive: true }); } catch(e){}
   });
 
   // Initial fetch of connected account statuses, and make both avatar-source
