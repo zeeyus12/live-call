@@ -4670,6 +4670,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     $('contactPickerModal').classList.remove('active');
     $('callPrepModal').classList.add('active');
     loadAnamSdk().catch(() => {}); // preload the avatar library so the first call doesn't pay for it
+    // Free any avatar session left open on Anam by an earlier page/tab/call (Anam keeps it until its own
+    // timeout, and the plan allows one), so the FIRST call doesn't hit the concurrency limit. Nothing of
+    // ours is running here, and it is done now, before Place Call, not inside the call.
+    if (state.anamKeySet && !SocialAnamSource.client && !anamClient) {
+      stopAnamSessions();
+    }
 
     $('prepContactName').textContent = contact.name || contact.target;
     $('prepContactDetails').textContent = `${contact.target} • ${currentSocialPlatform === 'whatsapp' ? 'WhatsApp' : 'Telegram'}`;
