@@ -2094,10 +2094,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (this.client) { try { await this.client.stopStreaming(); } catch(e){} this.client = null; }
       if (anamClient) { try { await anamClient.stopStreaming(); } catch(e){} anamClient = null; }
       if (this.closing) { await Promise.race([this.closing, new Promise(r => setTimeout(r, 4000))]); this.closing = null; }
-      // Clear anything still running on the account (leftovers of earlier calls) before opening a new session.
       if (anamStopPromise) await Promise.race([anamStopPromise, new Promise(r => setTimeout(r, 4000))]);
-      await Promise.race([stopAnamSessions(), new Promise(r => setTimeout(r, 4000))]);
-      if (stale()) return;
       if (stale()) return;
       // In a WaCalls avatar call this is the callee's voice; otherwise null and
       // the SDK behaves exactly as before (its own microphone).
@@ -2106,11 +2103,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       this.videoEl = vid;
       if (!state.anamKeySet) throw new Error('Add your Anam API key in Profile settings first.');
       if (!state.anamAvatarId) throw new Error('Pick an avatar first.');
-      const data = await mintAnamSession();
+      // Token and SDK load in parallel (both are slow on a cold start).
+      const [data, sdk] = await Promise.all([mintAnamSession(), loadAnamSdk()]);
       if (stale()) return;
-
-      const { createClient, AnamEvent } = await loadAnamSdk();
-      if (stale()) return;
+      const { createClient, AnamEvent } = sdk;
       const client = createClient(data.sessionToken);
       this.client = client;
       // During a call the avatar's voice goes to the callee over the call; it
@@ -4673,6 +4669,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     selectedSocialContact = contact;
     $('contactPickerModal').classList.remove('active');
     $('callPrepModal').classList.add('active');
+    loadAnamSdk().catch(() => {}); // preload the avatar library so the first call doesn't pay for it
 
     $('prepContactName').textContent = contact.name || contact.target;
     $('prepContactDetails').textContent = `${contact.target} • ${currentSocialPlatform === 'whatsapp' ? 'WhatsApp' : 'Telegram'}`;
@@ -5171,7 +5168,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         let lastErr = null;
         for (let i = 0; i < 3; i++) {
           try {
-            await withTimeout(activeSocialSource().start({ forSocialCall: true }), 30000, 'Starting the avatar');
+            await withTimeout(activeSocialSource().start({ forSocialCall: true }), i === 0 ? 20000 : 30000, 'Starting the avatar');
             lastErr = null;
             break;
           } catch (err) {
@@ -5182,8 +5179,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
             if (i === 2) break;
             const limit = isPlanLimitError(err);
             if (limit && selectedCallSource !== 'avatar') break;
+            if (limit) await Promise.race([stopAnamSessions(), new Promise(r => setTimeout(r, 4000))]);
+            if (cancelled()) return;
             setStatus(limit ? 'Waiting for the previous avatar session to close…' : 'Restarting the avatar…');
-            await new Promise(r => setTimeout(r, limit ? 6000 : 600));
+            await new Promise(r => setTimeout(r, limit ? 4000 : 300));
             if (cancelled()) return;
           }
         }
