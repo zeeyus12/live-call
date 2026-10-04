@@ -1115,7 +1115,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         const resp = await fetch('/api/anam', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
-          body: JSON.stringify({ action: 'session', avatarId: state.anamAvatarId, voiceId: state.anamVoiceId, systemPrompt: promptWithLanguage() }),
+          body: JSON.stringify({ action: 'session', avatarId: state.anamAvatarId, voiceId: state.anamVoiceId, systemPrompt: promptWithLanguage(), callerName: state.displayName, callContext: socialCallContext }),
         });
         const data = await resp.json().catch(() => ({}));
         if (resp.ok) return data;
@@ -1215,7 +1215,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     const resp = await fetch('/api/anam', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
-      body: JSON.stringify({ action: 'session', avatarId: state.anamAvatarId, voiceId: state.anamVoiceId, systemPrompt: promptWithLanguage() }),
+      body: JSON.stringify({ action: 'session', avatarId: state.anamAvatarId, voiceId: state.anamVoiceId, systemPrompt: promptWithLanguage(), callerName: state.displayName }),
     });
     const data = await resp.json();
     if (!resp.ok) { callStatus.textContent = 'Anam error: ' + JSON.stringify(data.error); return; }
@@ -1241,18 +1241,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   }
 
   const LANGUAGE_NAMES = { en:'English', es:'Spanish', fr:'French', pt:'Portuguese', de:'German', ha:'Hausa', yo:'Yoruba', ig:'Igbo', sw:'Swahili', ar:'Arabic', hi:'Hindi', zh:'Chinese' };
-  // Tells the avatar it is on a real phone call and who is who. Without this it treated the brief as
-  // something the person speaking had just said, and asked them whether to carry it out.
-  let socialCallContext = '';
+  // What the avatar needs to know about the call it is on (direction, platform, who the callee is).
+  // Sent with the session request; the server folds it into the prompt (lib/anamPrompt.js).
+  let socialCallContext = null;
   function setSocialCallContext(direction, platform, name){
-    const where = platform === 'whatsapp' ? 'WhatsApp video call' : 'video call';
-    const who = name ? `"${name}"` : 'the other person';
-    socialCallContext = `# Right now\nYou are live on a real ${where}, speaking out loud. ${direction === 'incoming' ? `${who} called you and you just picked up.` : `You placed this call to ${who} and they have just picked up.`} The person you hear is ${who}, not whoever wrote the brief below. The brief is your own private instructions: carry them out yourself, never read them out, and never ask the person you are speaking to whether you should do what the brief says or whether you may start. You only hear them; you cannot see them. When they greet you, greet back and move straight into the purpose of the call in a natural way.`;
+    socialCallContext = { direction, platform, otherName: name || '' };
   }
   function promptWithLanguage(){
-    const ctx = socialCallContext ? socialCallContext + '\n\n' : '';
-    if (!state.language || state.language === 'en') return ctx + state.systemPrompt;
-    return ctx + `Speak only in ${LANGUAGE_NAMES[state.language] || state.language} for this entire call, regardless of what language the brief below is written in. ${state.systemPrompt}`;
+    if (!state.language || state.language === 'en') return state.systemPrompt;
+    return `Speak only in ${LANGUAGE_NAMES[state.language] || state.language} for this entire call, regardless of what language the brief below is written in. ${state.systemPrompt}`;
   }
 
   function endCall(){
@@ -2105,7 +2102,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (!state.anamAvatarId) throw new Error('Pick an avatar first.');
       // Token and SDK load in parallel (both are slow on a cold start).
       const [data, sdk] = await Promise.all([mintAnamSession(), loadAnamSdk()]);
-      if (stale()) return;
+      if (stale()) throw new Error('Avatar start was cancelled');
       const { createClient, AnamEvent } = sdk;
       const client = createClient(data.sessionToken);
       this.client = client;
@@ -2116,7 +2113,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       vid.style.display = 'block';
       $('prepAvatarPlaceholder').style.display = 'none';
       const idle = $('socialCallIdle');
+      let videoStartedResolve; const videoStarted = new Promise(r => { videoStartedResolve = r; });
       client.addListener(AnamEvent.VIDEO_PLAY_STARTED, () => {
+        videoStartedResolve();
         if (stale()) return;
         if (idle) idle.style.display = 'none';
         $('prepLucyStatus').textContent = 'Avatar ready';
@@ -2144,6 +2143,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       });
       try { client.addListener(AnamEvent.SERVER_WARNING, (m) => console.warn('[avatar] Anam server warning:', m)); } catch(_){}
       await client.streamToVideoElement('prepAvatarPreview', calleeStream || undefined);
+      // "Connected" is not "on screen": make sure video is really playing, otherwise fail now so the
+      // caller restarts the avatar (what the second attempt did anyway) instead of calling with nothing.
+      await Promise.race([
+        videoStarted,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('The avatar connected but no video arrived')), 10000)),
+      ]);
       if (stale()) {
         let sid = null; try { sid = client.getActiveSessionId && client.getActiveSessionId(); } catch(_){}
         try { client.stopStreaming(); } catch(e){}
@@ -5181,6 +5186,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
             lastErr = err;
             if (cancelled()) return;
             console.warn(`[avatar] start attempt ${i + 1} failed:`, err && err.message);
+            setStatus(`Avatar attempt ${i + 1} failed: ${(err && err.message || err)}`.slice(0, 140));
             try { activeSocialSource().stop(); } catch(e){}
             if (i === 2) break;
             const limit = isPlanLimitError(err);
@@ -5434,7 +5440,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     callAttemptSeq++; // cancels a placeSocialCall() that is still setting up
     clearInterval(socialCallDurationTimer); socialCallDurationTimer = null;
     stopRingback();
-    socialCallContext = '';
+    socialCallContext = null;
     // Only the engine that carried THIS call is torn down: Green API's browser
     // client hangs up client-side, WaCalls ends the call server-side through
     // /api/social-call/hangup further down (which deletes it on WaCalls).

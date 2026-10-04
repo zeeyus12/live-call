@@ -64,7 +64,7 @@ export default async function handler(req, res) {
     const { action } = req.body || {};
 
     if (action === 'session') {
-      const { avatarId, voiceId, systemPrompt } = req.body || {};
+      const { avatarId, voiceId, systemPrompt, callerName, callContext } = req.body || {};
       if (!avatarId) return res.status(400).json({ error: 'avatarId is required' });
       try {
         // Prefetch: pull whatever's been learned about this person from past
@@ -80,14 +80,14 @@ export default async function handler(req, res) {
           headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify({
             personaConfig: {
-              name: 'Persona',
+              name: (typeof callerName === 'string' && callerName.trim().slice(0, 60)) || 'Persona',
               avatarId,
               voiceId: voiceId || DEFAULT_VOICE_ID,
               llmId: DEFAULT_LLM_ID,
               // Anam auto-generates its own opening greeting by default, unrelated to
               // systemPrompt - skipGreeting keeps it silent until the other side speaks
               // first, so its first reply is grounded in the brief.
-              systemPrompt: buildSystemPrompt(systemPrompt, memRow?.facts || ''),
+              systemPrompt: buildSystemPrompt(systemPrompt, memRow?.facts || '', { callerName, callContext }),
               skipGreeting: true,
             },
           }),
