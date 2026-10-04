@@ -14,7 +14,7 @@ assert.ok(i('# Ground rules') < i(brief) && i(brief) < i('# What you know about 
 assert.ok(i(brief) < i('# How to be on this call'), 'representation rules follow the brief');
 assert.ok(p.includes(mem));
 // no forced script: no mandatory greeting/structure/stock phrases
-for (const bad of ['Call structure', 'Open with a casual', 'light pleasantries', 'sign-off', 'um,', 'you know,']) {
+for (const bad of ['Call structure', 'Open with a casual', 'light pleasantries', 'sign-off']) {
   assert.ok(!p.includes(bad), `prompt must not contain scripted instruction: ${bad}`);
 }
 // assistant phrases appear only inside the "never say" list, never as an instruction to use them
@@ -50,3 +50,6 @@ assert.ok(!api.includes("name: 'Assistant'"));
 assert.ok(api.includes('skipGreeting: true'));
 assert.equal((api.match(/buildSystemPrompt\(/g) || []).length, 1, 'exactly one prompt build site');
 console.log('anam-prompt: all checks passed');
+
+assert.ok(/hmm/.test(p) && /haha/.test(p) && /sigh/.test(p) && /giggle/.test(p) && /Pause the way people do/.test(p) && /Don't write stage directions/.test(p));
+console.log('anam-prompt: realism checks passed');
