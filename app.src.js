@@ -2133,6 +2133,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         if (this.client === client) this.client = null;
         if (stale()) return;
         const why = anamCloseReason(code, details);
+        trace('avatar connection closed: ' + why);
         console.warn('[avatar] Anam connection closed:', code, details || '');
         if (!$('socialCallScreen')?.classList.contains('active')) return;
         // On a WhatsApp call the avatar is just one half of it: losing the avatar
@@ -2988,6 +2989,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           if (!this.active) return;
           const st = pc.iceConnectionState;
           console.log(`[WaCalls] media ICE state: ${st} (callId=${this.callId})`);
+          trace('media link: ' + st);
           if (st === 'failed') {
             console.error(`[WaCalls] media connection FAILED for callId=${this.callId}`);
             showCallFailureAndEnd('Call media connection lost');
@@ -3496,6 +3498,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // call screen has closed - the on-screen label used to vanish with the screen.
   let lastEndReason = '';
   function noteEndReason(r){ if (r) lastEndReason = String(r); }
+  // Timeline of the call ("2.1s avatar: ready"), kept in memory and shown under the
+  // end-of-call banner, so one screenshot says what happened and when.
+  const callTrace = []; let callTraceT0 = Date.now();
+  function resetTrace(){ callTrace.length = 0; callTraceT0 = Date.now(); }
+  function trace(msg){
+    callTrace.push(((Date.now() - callTraceT0) / 1000).toFixed(1) + 's ' + String(msg).slice(0, 140));
+    if (callTrace.length > 60) callTrace.shift();
+    try { console.log('[trace] ' + msg); } catch(e){}
+  }
   function showEndToast(text){
     let t = $('callEndToast');
     if (!t) {
@@ -3505,10 +3516,28 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       t.addEventListener('click', () => { t.style.display = 'none'; });
       document.body.appendChild(t);
     }
-    t.textContent = text;
+    t.textContent = '';
+    const head = document.createElement('div');
+    head.textContent = text;
+    t.appendChild(head);
+    if (callTrace.length) {
+      const pre = document.createElement('div');
+      pre.style.cssText = 'margin-top:8px; font:11px/1.45 ui-monospace,Menlo,monospace; color:#e8b8b2; white-space:pre-wrap; word-break:break-word;';
+      pre.textContent = callTrace.slice(-14).join('\n');
+      t.appendChild(pre);
+      const copy = document.createElement('button');
+      copy.textContent = 'Copy details';
+      copy.style.cssText = 'margin-top:8px; padding:6px 12px; border-radius:10px; border:1px solid #7a2a2a; background:#3a1a1c; color:#ffd0ca; font-size:12px;';
+      copy.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const all = text + '\n' + callTrace.join('\n');
+        try { navigator.clipboard.writeText(all); copy.textContent = 'Copied'; } catch(_) { copy.textContent = 'Copy failed'; }
+      });
+      t.appendChild(copy);
+    }
     t.style.display = 'block';
     clearTimeout(t._hide);
-    t._hide = setTimeout(() => { t.style.display = 'none'; }, 15000);
+    t._hide = setTimeout(() => { t.style.display = 'none'; }, 45000);
   }
   function endReasonText(reason){
     const r = String(reason || '').toLowerCase();
@@ -3520,6 +3549,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     return reason ? String(reason) : 'unknown reason';
   }
   function showCallFailureAndEnd(message){
+    trace('FAILURE: ' + message);
     noteEndReason(message);
     stopRingback();
     if ($('socialCallScreen')?.classList.contains('active')) {
@@ -3762,6 +3792,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // generic UI working; this handler is for what is WaCalls-specific: the
   // incoming-call offer, media ready/not ready, and the peer asking for video.
   function handleWaCallsEvent(evt){
+    try { trace('event: ' + evt.kind + (evt.subtype ? '/' + evt.subtype : '') + (evt.reason ? ' (' + evt.reason + ')' : '')); } catch(_){}
     const lbl = $('socialCallStatusLabel');
     switch (evt.kind) {
       case 'incoming':
@@ -5214,7 +5245,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // the real reason is shown. If it is just slow, the phone rings anyway and
       // the avatar attaches as soon as it is ready - waiting on it used to mean
       // no ring at all for as long as it took (or until it failed).
-      const avatarPromise = startAvatar();
+      resetTrace();
+      trace('call started (' + (selectedCallSource === 'avatar' ? 'avatar' : 'Lucy') + ')');
+      const avatarPromise = startAvatar().then(
+        () => { trace('avatar: ready'); },
+        (e) => { trace('avatar: FAILED - ' + (e && e.message || e)); throw e; }
+      );
       avatarPromise.catch(() => {}); // handled below
       let avatarState = 'pending';
       await Promise.race([
@@ -5229,6 +5265,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       }
 
       setStatus('Calling…');
+      trace('placing the call');
       // Place call on backend bridge
       const ctl = new AbortController();
       const placeTimer = setTimeout(() => ctl.abort(), 25000);

@@ -39,4 +39,5 @@ assert.ok(!/onCallAnswered = \(\) => \{\s*startAvatar/.test(app), 'avatar must n
 assert.ok(app.includes('const avatarPromise = startAvatar();') && app.includes('isPlanLimitError(err)'));
 assert.ok(app.includes('function startSocialCallTimer()'));
 assert.ok(app.includes('showEndToast(lastEndReason)') && app.includes('browser_media_failed'));
+assert.ok(app.includes('function trace(msg)') && app.includes('Copy details'));
 console.log('provider-wiring: all checks passed');
