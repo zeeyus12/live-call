@@ -36,7 +36,7 @@ assert.ok(!/CONNECTION_CLOSED, \(\) => \{[^}]*endSocialCall\(\);\s*\}\);/.test(a
 assert.ok(app.includes('startSilence()') && app.includes("this.ctx.fillStyle = '#101010'"));
 // Avatar joins BEFORE the callee: it is started before the call is placed, not on answer.
 assert.ok(!/onCallAnswered = \(\) => \{\s*startAvatar/.test(app), 'avatar must not be deferred to the answer');
-assert.ok(app.includes('const avatarPromise = startAvatar();') && app.includes('isPlanLimitError(err)'));
+assert.ok(app.includes('const avatarPromise = startAvatar().then(') && app.includes('isPlanLimitError(err)'));
 assert.ok(app.includes('function startSocialCallTimer()'));
 assert.ok(app.includes('showEndToast(lastEndReason)') && app.includes('browser_media_failed'));
 assert.ok(app.includes('function trace(msg)') && app.includes('Copy details'));
