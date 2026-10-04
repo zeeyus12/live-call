@@ -21,7 +21,7 @@ for (const bad of ['Call structure', 'Open with a casual', 'light pleasantries',
 assert.ok(/Don't say things like "how can I help you"/.test(p));
 // representation behaviour
 assert.ok(/not an assistant/.test(p) && /private/.test(p) && /never read it out/.test(p));
-assert.ok(/Don't open with your objective/.test(p));
+assert.ok(/never as the first thing you say/.test(p));
 assert.ok(/who are you\?/.test(p) && /where is she\?/.test(p) && /without inventing/.test(p));
 assert.ok(/on behalf of/.test(p) && /never announce what you are/i.test(p) || /never announce what you are/.test(p));
 // identity + situation come from the configured caller and call, not hardcoded
