@@ -44,4 +44,6 @@ assert.ok(app.includes('function trace(msg)') && app.includes('Copy details'));
 assert.ok(/trace\('call screen closed'\);\s*if \(lastEndReason\) \{ showEndToast/.test(app));
 assert.ok(app.includes('hc.abort(), 6000'));
 assert.ok(app.includes('emptyStops'));
+// Avatar video sent to the callee is read from the visible call-screen element, not the hidden prep one.
+assert.ok(app.includes("if (this.source === 'anam') {") && app.includes('avatar frames are BLACK'));
 console.log('provider-wiring: all checks passed');

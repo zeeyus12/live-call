@@ -3161,7 +3161,19 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // video lag further and further behind. Drop this frame and send the next fresh one instead.
       if (this.videoDC.bufferedAmount > 128 * 1024) return;
       if (this.encoder.encodeQueueSize > 2) return;
-      const vid = this.avatarSource().getVideoElement() || $('socialRemoteVideo');
+      let vid = this.avatarSource().getVideoElement() || $('socialRemoteVideo');
+      if (this.source === 'anam') {
+        // The avatar's own element sits on the prep screen, which is hidden once the call
+        // screen opens, and a hidden <video> can hand canvas.drawImage() black frames (the
+        // callee saw a blank screen while the avatar was clearly visible on this phone).
+        // The call screen's own element shows the same stream and is on screen, so read
+        // the picture from that one whenever it is playing.
+        const live = $('socialRemoteVideo');
+        if (live && live.srcObject && live.videoWidth > 0) {
+          if (live.paused) { try { live.play().catch(() => {}); } catch (e) {} }
+          vid = live;
+        }
+      }
       const avatarLive = !!(vid && (vid.videoWidth || vid.readyState >= 2));
       if (!avatarLive) {
         // The avatar takes several seconds to start (it only starts once the
@@ -3177,6 +3189,20 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           drawCover(this.ctx, vid, this.canvas.width, this.canvas.height);
         } catch (e) {
           return; // frame not decoded yet / cross-origin - try the next tick
+        }
+        // Every ~2s check the frame we are about to send is not just black, and say so
+        // in the call timeline if it is - "the callee sees blank" becomes visible here.
+        this.frameCount = (this.frameCount || 0) + 1;
+        if (this.frameCount === 1) trace('video: first avatar frame sent (' + (vid.id || 'avatar element') + ' ' + vid.videoWidth + 'x' + vid.videoHeight + ')');
+        if (this.frameCount % 30 === 0) {
+          try {
+            const w = this.canvas.width, h = this.canvas.height;
+            const d = this.ctx.getImageData(Math.floor(w / 2) - 8, Math.floor(h / 2) - 8, 16, 16).data;
+            let sum = 0; for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+            const dark = (sum / (d.length / 4) / 3) < 10;
+            if (dark) { this.darkRuns = (this.darkRuns || 0) + 1; if (this.darkRuns === 2) trace('video: avatar frames are BLACK (callee will see blank)'); }
+            else { if (this.darkRuns >= 2) trace('video: avatar frames are visible again'); this.darkRuns = 0; }
+          } catch (e) {}
         }
       }
       const ts = Math.round(performance.now() * 1000); // microseconds
@@ -3246,6 +3272,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const sent = { ...this.sent };
       const received = { ...this.received };
       this.active = false;
+      this.frameCount = 0; this.darkRuns = 0;
       this.stopSilence();
       clearInterval(this.encodeTimer);
       this.encodeTimer = null;
