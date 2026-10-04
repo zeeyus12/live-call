@@ -3115,8 +3115,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         return;
       }
       this.canvas = document.createElement('canvas');
-      this.canvas.width = 480;
-      this.canvas.height = 640;
+      // Tall, phone-screen proportions (about 9:19.5): the callee's WhatsApp shows the picture at its own
+      // aspect ratio, so a 3:4 frame is letterboxed with black bars above and below. This fills the screen.
+      this.canvas.width = 352;
+      this.canvas.height = 768;
       this.ctx = this.canvas.getContext('2d');
 
       let encodeErrors = 0;
@@ -4675,12 +4677,6 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     $('contactPickerModal').classList.remove('active');
     $('callPrepModal').classList.add('active');
     loadAnamSdk().catch(() => {}); // preload the avatar library so the first call doesn't pay for it
-    // Free any avatar session left open on Anam by an earlier page/tab/call (Anam keeps it until its own
-    // timeout, and the plan allows one), so the FIRST call doesn't hit the concurrency limit. Nothing of
-    // ours is running here, and it is done now, before Place Call, not inside the call.
-    if (state.anamKeySet && !SocialAnamSource.client && !anamClient) {
-      stopAnamSessions();
-    }
 
     $('prepContactName').textContent = contact.name || contact.target;
     $('prepContactDetails').textContent = `${contact.target} • ${currentSocialPlatform === 'whatsapp' ? 'WhatsApp' : 'Telegram'}`;
