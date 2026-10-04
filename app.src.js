@@ -2046,12 +2046,16 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       try {
         const h = keepalive && anamAuthCache ? anamAuthCache : await authHeader();
         anamAuthCache = h;
-        await fetch('/api/anam', {
+        const r = await fetch('/api/anam', {
           method: 'POST', keepalive,
           headers: { 'Content-Type': 'application/json', ...h },
           body: JSON.stringify({ action: 'stop-active' }),
         });
-      } catch(e){ console.warn('[avatar] stop-active failed:', e && e.message); }
+        if (keepalive) return null;
+        const d = await r.json().catch(() => null);
+        try { trace(r.ok && d ? `anam: ${d.found} running session(s) found, ${d.stopped} stopped` : `anam: stop-active failed (HTTP ${r.status})`); } catch(_){}
+        return r.ok ? d : null;
+      } catch(e){ console.warn('[avatar] stop-active failed:', e && e.message); return null; }
     };
     anamStopPromise = run();
     return anamStopPromise;
@@ -5208,7 +5212,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         setStatus('Starting avatar…');
         // Up to 3 tries. A concurrency error usually means the previous session (this call's own
         // failed first try, or the last call) is still closing on Anam's side: wait longer, then retry.
-        let lastErr = null;
+        let lastErr = null, emptyStops = 0;
         for (let i = 0; i < 3; i++) {
           try {
             await withTimeout(activeSocialSource().start({ forSocialCall: true }), i === 0 ? 20000 : 30000, 'Starting the avatar');
@@ -5223,7 +5227,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
             if (i === 2) break;
             const limit = isPlanLimitError(err);
             if (limit && selectedCallSource !== 'avatar') break;
-            if (limit) await Promise.race([stopAnamSessions(), new Promise(r => setTimeout(r, 4000))]);
+            if (limit) {
+              const freed = await Promise.race([stopAnamSessions(), new Promise(r => setTimeout(() => r(null), 6000))]);
+              // Anam says the limit is reached yet shows no running session to stop, twice in a
+              // row: waiting longer will not help. Say so now instead of holding the call open.
+              if (freed && freed.found === 0 && ++emptyStops >= 2) {
+                throw new Error('Anam reports its session limit is reached, but no session is running on this account to stop. '
+                  + 'Check Anam > Sessions for one still open (another device, or the dashboard playground), or the limit is your plan itself.');
+              }
+            }
             if (cancelled()) return;
             setStatus(limit ? 'Waiting for the previous avatar session to close…' : 'Restarting the avatar…');
             await new Promise(r => setTimeout(r, limit ? 4000 : 300));
@@ -5255,7 +5267,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       let avatarState = 'pending';
       await Promise.race([
         avatarPromise.then(() => { avatarState = 'ready'; }), // a rejection throws -> caught below, nothing placed
-        new Promise((r) => setTimeout(r, 8000)),
+        new Promise((r) => setTimeout(r, 16000)),
       ]);
       if (cancelled()) return;
       if (avatarState === 'pending') {
@@ -5476,6 +5488,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
   async function endSocialCall(){
     callAttemptSeq++; // cancels a placeSocialCall() that is still setting up
+    trace('call screen closed');
+    if (lastEndReason) { showEndToast(lastEndReason); lastEndReason = ''; }
     clearInterval(socialCallDurationTimer); socialCallDurationTimer = null;
     stopRingback();
     socialCallContext = null;
@@ -5512,12 +5526,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     }
 
     try {
-      await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/hangup', { method: 'POST' });
+      const hc = new AbortController();
+      const ht = setTimeout(() => hc.abort(), 6000); // never let the hangup request hang the cleanup
+      await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/hangup', { method: 'POST', signal: hc.signal });
+      clearTimeout(ht);
     } catch(e){}
 
     // Update Recent calls list with new record
     renderRecent();
-    if (lastEndReason) { showEndToast(lastEndReason); lastEndReason = ''; }
   }
 
   // Closing/reloading the page mid-call must not leave a live avatar session

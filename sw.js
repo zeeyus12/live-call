@@ -1,4 +1,4 @@
-const CACHE = 'live-call-v14';
+const CACHE = 'live-call-v15';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './boot.js', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {

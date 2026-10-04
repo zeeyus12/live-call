@@ -40,4 +40,8 @@ assert.ok(app.includes('const avatarPromise = startAvatar().then(') && app.inclu
 assert.ok(app.includes('function startSocialCallTimer()'));
 assert.ok(app.includes('showEndToast(lastEndReason)') && app.includes('browser_media_failed'));
 assert.ok(app.includes('function trace(msg)') && app.includes('Copy details'));
+// End-of-call reason is shown immediately (not behind the hangup request) and the hangup can't hang.
+assert.ok(/trace\('call screen closed'\);\s*if \(lastEndReason\) \{ showEndToast/.test(app));
+assert.ok(app.includes('hc.abort(), 6000'));
+assert.ok(app.includes('emptyStops'));
 console.log('provider-wiring: all checks passed');
