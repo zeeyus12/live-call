@@ -53,3 +53,7 @@ console.log('anam-prompt: all checks passed');
 
 assert.ok(/hmm/.test(p) && /haha/.test(p) && /sigh/.test(p) && /giggle/.test(p) && /Pause the way people do/.test(p) && /Don't write stage directions/.test(p));
 console.log('anam-prompt: realism checks passed');
+
+assert.ok(/answer their hello with a hello of your own/.test(p) && /pleasantries before anything from the brief/.test(p) && /never as the first thing you say/.test(p) && /time limit/.test(p));
+assert.ok(/Let them speak first/.test(buildSystemPrompt(brief,'',{callContext:{direction:'outgoing',platform:'whatsapp',otherName:'John'}})));
+console.log('anam-prompt: opening/pleasantries checks passed');
