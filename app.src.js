@@ -3794,11 +3794,16 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         // turn a camera on someone), then use the documented WaCalls path:
         // renegotiate the same peer connection, then tell WaCalls to signal the
         // upgrade to WhatsApp.
-        if (!WaCallsMediaLeg.active || WaCallsMediaLeg.video) return;
-        if (!confirm('The other side wants to switch this call to video. Send your avatar video?')) return;
+        // Do NOT use confirm() here: WhatsApp sends this request several times within a second, and a
+        // blocking dialog freezes the page (audio, video and the media socket all stall), which made the
+        // callee see buffering and the call drop with "browser_media_failed". This call is an avatar
+        // video call, so just switch to video, once.
+        if (!WaCallsMediaLeg.active || WaCallsMediaLeg.video || WaCallsMediaLeg.upgrading) return;
+        WaCallsMediaLeg.upgrading = true;
         WaCallsMediaLeg.upgradeToVideo()
           .then(() => console.log('[WaCalls] call upgraded to video'))
-          .catch((e) => console.warn('[WaCalls] video upgrade failed:', e.message));
+          .catch((e) => console.warn('[WaCalls] video upgrade failed:', e.message))
+          .finally(() => { WaCallsMediaLeg.upgrading = false; });
         return;
       }
       case 'ended':
