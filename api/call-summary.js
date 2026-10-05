@@ -1,6 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
 import webpush from 'web-push';
 import { getProviderKey } from '../lib/keys.js';
+import { summarizeCall, groqText, turnsToText } from '../lib/summarize.js';
+
+// Polling Anam for a transcript + two model calls can take a while; give the function room.
+export const config = { maxDuration: 60 };
 
 // Called right when a call ends. Deliberately does not take a session id from
 // the client - the session-token response doesn't hand one back, so instead
@@ -50,27 +54,13 @@ function transcriptToText(transcript) {
 }
 
 async function summarize(transcriptText) {
-  const apiKey = process.env.GROQ_API_KEY;
-  const systemPrompt = `You just finished a live call as an AI persona. Write a short natural summary of
+  const system = `You just finished a live call as an AI persona. Write a short natural summary of
 the call for the person who set up the call to read afterward - the same tone Mitra uses: warm, plain
 language, first-person ("I called X, we talked about..."). Cover: who was called (if named), what was
 discussed, anything the other person shared that's worth remembering (mood, news, requests), and how
 the call ended. 2-4 sentences. No headers, no bullet points, just a short natural paragraph.`;
-  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: 'openai/gpt-oss-120b',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: transcriptText || '(No speech was captured on this call.)' },
-      ],
-      temperature: 0.6,
-      max_completion_tokens: 300,
-    }),
-  });
-  const data = await r.json();
-  return data?.choices?.[0]?.message?.content?.trim() || 'Call ended - no summary could be generated.';
+  const out = await groqText({ apiKey: process.env.GROQ_API_KEY, system, user: transcriptText || '(No speech was captured on this call.)', temperature: 0.6, maxTokens: 300 });
+  return out || 'Call ended - no summary could be generated.';
 }
 
 // Sync step: fold anything durable from this call into the persona's
@@ -81,28 +71,14 @@ the call ended. 2-4 sentences. No headers, no bullet points, just a short natura
 // append would; each call is a chance to consolidate, not just add.
 async function extractMemory(transcriptText, existingFacts) {
   if (!transcriptText) return existingFacts; // nothing new to learn from a silent/failed call
-  const apiKey = process.env.GROQ_API_KEY;
-  const systemPrompt = `You maintain a persona's standing memory of one specific person across calls.
+  const system = `You maintain a persona's standing memory of one specific person across calls.
 Given the EXISTING memory (may be empty) and a NEW call transcript, output the updated memory: merge in
 any new durable facts (their name, preferences, ongoing situations, things they care about, recurring
 topics), and drop anything that was clearly one-off or no longer relevant. Keep it as short plain
 bullet points - facts only, no commentary, no "the caller said". If nothing durable came up this call,
 just return the existing memory unchanged. Output ONLY the bullet list, nothing else.`;
-  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: 'openai/gpt-oss-120b',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `EXISTING MEMORY:\n${existingFacts || '(none yet)'}\n\nNEW TRANSCRIPT:\n${transcriptText}` },
-      ],
-      temperature: 0.3,
-      max_completion_tokens: 500,
-    }),
-  });
-  const data = await r.json();
-  return data?.choices?.[0]?.message?.content?.trim() || existingFacts;
+  const out = await groqText({ apiKey: process.env.GROQ_API_KEY, system, user: `EXISTING MEMORY:\n${existingFacts || '(none yet)'}\n\nNEW TRANSCRIPT:\n${transcriptText}`, temperature: 0.3, maxTokens: 500 });
+  return out || existingFacts;
 }
 
 export default async function handler(req, res) {
@@ -122,18 +98,30 @@ export default async function handler(req, res) {
   if (userErr || !userData?.user) return res.status(401).json({ error: 'Invalid session' });
   const userId = userData.user.id;
 
-  const { historyId } = req.body || {};
+  const { historyId, callee, platform, durationSec, answered, sessionId: clientSessionId } = req.body || {};
   if (!historyId) return res.status(400).json({ error: 'historyId required' });
 
-  const anamKey = await getProviderKey(supabase, userId, 'anam');
-  if (!anamKey) return res.status(400).json({ error: 'No Anam key on file for this user' });
+  // Calls the app made itself (WhatsApp) send the transcript it already holds, so there is no
+  // waiting on Anam's session report and no guessing which session was "the last one".
+  let clientTurns = Array.isArray(req.body?.transcript) ? req.body.transcript : null;
+  if (clientTurns) clientTurns = clientTurns.slice(-200).map((t) => ({ role: String(t.role || ''), content: String(t.content || t.text || '').slice(0, 600) }));
 
-  const sessionId = await findJustEndedSessionId(anamKey);
-  if (!sessionId) return res.status(200).json({ summary: null, reason: 'No recent session found' });
-
-  const transcript = await pollTranscript(anamKey, sessionId);
-  const transcriptText = transcriptToText(transcript);
-  const summary = await summarize(transcriptText);
+  let transcriptText = '';
+  let summary = '';
+  if (clientTurns || platform === 'whatsapp') {
+    const calleeName = typeof callee === 'string' ? callee.slice(0, 60) : '';
+    const wasAnswered = answered !== false;
+    summary = await summarizeCall({ apiKey: process.env.GROQ_API_KEY, callee: calleeName, answered: wasAnswered, durationSec: Number(durationSec) || 0, turns: clientTurns || [], platform: 'whatsapp' });
+    transcriptText = turnsToText(clientTurns || [], { calleeName: calleeName || 'Them' });
+  } else {
+    const anamKey = await getProviderKey(supabase, userId, 'anam');
+    if (!anamKey) return res.status(400).json({ error: 'No Anam key on file for this user' });
+    const sessionId = (typeof clientSessionId === 'string' && clientSessionId) || await findJustEndedSessionId(anamKey);
+    if (!sessionId) return res.status(200).json({ summary: null, reason: 'No recent session found' });
+    const transcript = await pollTranscript(anamKey, sessionId);
+    transcriptText = transcriptToText(transcript);
+    summary = await summarize(transcriptText);
+  }
 
   // Sync: merge whatever's durable from this call into standing memory,
   // so the next call (see api/anam.js's prefetch) starts already knowing it.
@@ -155,7 +143,7 @@ export default async function handler(req, res) {
   if (vapidPublic && vapidPrivate && vapidSubject) {
     webpush.setVapidDetails(vapidSubject, vapidPublic, vapidPrivate);
     const { data: subs } = await supabase.from('push_subscriptions').select('*').eq('user_id', userId);
-    const payload = JSON.stringify({ title: 'Call summary', body: summary });
+    const payload = JSON.stringify({ title: callee ? `Call summary - ${String(callee).slice(0, 40)}` : 'Call summary', body: summary });
     await Promise.all((subs || []).map(async (sub) => {
       try {
         await webpush.sendNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, payload);

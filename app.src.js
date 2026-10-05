@@ -2079,6 +2079,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     // a live avatar session afterwards (the orphaned "avatar already talking,
     // no call screen, no End button" state).
     gen: 0,
+    transcript: [],
     getVideoElement(){ return this.videoEl; },
     getStream(){ return this.videoEl && this.videoEl.captureStream ? this.videoEl.captureStream() : null; },
     isActive(){ return !!this.client; },
@@ -2132,6 +2133,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         // though the avatar itself was working and being sent out fine.
         const remoteVid = $('socialRemoteVideo');
         if (remoteVid && vid.srcObject) remoteVid.srcObject = vid.srcObject;
+      });
+      this.transcript = [];
+      client.addListener(AnamEvent.MESSAGE_HISTORY_UPDATED, (msgs) => {
+        // Full history each time. Kept after the call ends so the summary can use it.
+        try { this.transcript = (msgs || []).map((m) => ({ role: m.role, content: m.content })); } catch(_){}
       });
       client.addListener(AnamEvent.CONNECTION_CLOSED, (code, details) => {
         if (this.client === client) this.client = null;
@@ -3527,7 +3533,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // no explanation anywhere.
   // Why the last call ended (set by whatever ended it), shown as a toast once the
   // call screen has closed - the on-screen label used to vanish with the screen.
-  let lastEndReason = '';
+  let lastEndReason = '', lastRemoteEndReason = '';
   function noteEndReason(r){ if (r) lastEndReason = String(r); }
   // Timeline of the call ("2.1s avatar: ready"), kept in memory and shown under the
   // end-of-call banner, so one screenshot says what happened and when.
@@ -3870,6 +3876,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       }
       case 'ended':
         console.log(`[WaCalls] call ended (${evt.reason || 'ended'})`);
+        lastRemoteEndReason = evt.reason || 'ended';
         hideIncomingWaCallsCall();
         if ($('socialCallScreen')?.classList.contains('active')) {
           // Not ended by the End button (that closes the screen first), so say why.
@@ -3918,7 +3925,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         stopRingback();
         if (status === 'reject') showCallFailureAndEnd('Call declined');
         else if (status === 'timeout') showCallFailureAndEnd('No answer');
-        else endSocialCall();
+        else {
+          // The other side (or the network) ended it while the call screen was up - say so.
+          if ($('socialCallScreen')?.classList.contains('active')) noteEndReason('Call ended: ' + endReasonText((msg.call && msg.call.reason) || lastRemoteEndReason || 'ended'));
+          endSocialCall();
+        }
       }
     }
     if (msg.type === 'call_state') {
@@ -3939,6 +3950,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         showCallFailureAndEnd(msg.error || 'Call failed');
       } else if (msg.state === 'ended') {
         stopRingback();
+        // The call screen is still up, so this was NOT the End button: the other side
+        // (or the network) ended it. Record why, so the banner can say so.
+        if ($('socialCallScreen')?.classList.contains('active')) {
+          noteEndReason('Call ended: ' + endReasonText(lastRemoteEndReason || 'ended'));
+        }
         endSocialCall();
       }
     }
@@ -5236,13 +5252,20 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // Activate whichever outgoing source was picked - Lucy 2.5 (live face
       // swap of your own camera) or an Anam AI avatar.
       const startAvatar = async () => {
+        const startedAvatarAt = Date.now();
         setStatus('Starting avatar…');
+        const tick = setInterval(() => {
+          if (cancelled()) { clearInterval(tick); return; }
+          const l = $('socialCallStatusLabel');
+          if (l && /^Starting avatar/.test(l.textContent)) l.textContent = `Starting avatar… ${Math.round((Date.now() - startedAvatarAt) / 1000)}s`;
+        }, 1000);
+        try {
         // Up to 3 tries. A concurrency error usually means the previous session (this call's own
         // failed first try, or the last call) is still closing on Anam's side: wait longer, then retry.
         let lastErr = null, emptyStops = 0;
         for (let i = 0; i < 3; i++) {
           try {
-            await withTimeout(activeSocialSource().start({ forSocialCall: true }), i === 0 ? 20000 : 30000, 'Starting the avatar');
+            await withTimeout(activeSocialSource().start({ forSocialCall: true }), i === 0 ? 40000 : 40000, 'Starting the avatar');
             lastErr = null;
             break;
           } catch (err) {
@@ -5277,6 +5300,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           if (voice) WaCallsMediaLeg.attachOutgoingAudio(voice);
           else console.warn('[WaCalls] the avatar produced no audio track - the callee will not hear it');
         }
+        } finally { clearInterval(tick); }
       };
       // The avatar gets a head start so it is normally up BEFORE the callee
       // picks up (it stays silent until they speak - skipGreeting). If it fails
@@ -5513,10 +5537,51 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     });
   })();
 
+  // ---- WhatsApp avatar call -> summary --------------------------------------
+  // The in-app avatar call already sent a summary push when it ended; WhatsApp avatar calls
+  // never did. Taken at the very top of endSocialCall (before anything is torn down).
+  let waSummaryKey = 0;
+  function captureWaAvatarCallForSummary(){
+    if (currentSocialPlatform !== 'whatsapp' || currentCallEngine !== 'wacalls' || selectedCallSource !== 'avatar') return null;
+    if (!$('socialCallScreen')?.classList.contains('active')) return null; // already ended / nothing to summarise
+    const key = socialCallStartedAt || Date.now();
+    if (waSummaryKey === key && socialCallStartedAt) return null; // one summary per call
+    const answered = !!socialCallDurationTimer;
+    const reason = String(lastEndReason || '');
+    // A call that never connected only deserves a note if the other side didn't pick up;
+    // if WE failed (avatar/server error) the failure banner already says so.
+    if (!answered && !/declin|no answer|nobody|busy|didn.t/i.test(reason)) return null;
+    waSummaryKey = key;
+    return {
+      callee: (selectedSocialContact && (selectedSocialContact.name || selectedSocialContact.target)) || '',
+      answered,
+      durationSec: answered ? Math.max(0, Math.round((Date.now() - socialCallStartedAt) / 1000)) : 0,
+      transcript: (SocialAnamSource.transcript || []).slice(-200),
+    };
+  }
+  async function sendWaCallSummary(job){
+    if (!job || !currentUser) return;
+    try {
+      const mins = job.durationSec >= 60 ? `${Math.floor(job.durationSec / 60)}m ${job.durationSec % 60}s` : `${job.durationSec}s`;
+      const label = job.answered ? `WhatsApp call with ${job.callee || 'contact'} (${mins})` : `WhatsApp call to ${job.callee || 'contact'} - not answered`;
+      const historyId = await addHistory({ provider: 'anam', summary: label });
+      trace('summary: requested' + (historyId ? '' : ' (no history row)'));
+      if (!historyId) return;
+      const body = JSON.stringify({ historyId, platform: 'whatsapp', callee: job.callee, answered: job.answered, durationSec: job.durationSec, transcript: job.transcript });
+      await fetch('/api/call-summary', {
+        method: 'POST', keepalive: body.length < 60000,
+        headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+        body,
+      });
+    } catch (e) { console.error('WhatsApp call-summary request failed:', e); }
+  }
+
   async function endSocialCall(){
     callAttemptSeq++; // cancels a placeSocialCall() that is still setting up
     trace('call screen closed');
+    const waSummaryJob = captureWaAvatarCallForSummary();
     if (lastEndReason) { showEndToast(lastEndReason); lastEndReason = ''; }
+    if (waSummaryJob) sendWaCallSummary(waSummaryJob); // fire-and-forget: the push is what reaches you
     clearInterval(socialCallDurationTimer); socialCallDurationTimer = null;
     stopRingback();
     socialCallContext = null;
