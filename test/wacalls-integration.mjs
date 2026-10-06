@@ -149,7 +149,12 @@ const stubServer = http.createServer(async (req, res) => {
   if (/^\/api\/sessions\/s1\/calls$/.test(p) && req.method === 'GET') {
     return stubJson(res, 200, { active: 0, maxCallsPerSession: 8 });
   }
+  if (/^\/api\/sessions\/s1\/calls$/.test(p) && req.method === 'DELETE') {
+    const n = stub.stuckCalls || 0; stub.stuckCalls = 0; stub.refuseCalls = 0;
+    return stubJson(res, 200, { cleared: n });
+  }
   if (/^\/api\/sessions\/s1\/calls$/.test(p) && req.method === 'POST') {
+    if (stub.refuseCalls > 0) return stubJson(res, 429, { error: 'max concurrent calls' });
     return stubJson(res, 200, { call: { callId: 'call-1' } });
   }
 
@@ -442,6 +447,20 @@ async function main() {
     check('green api contacts never touches WaCalls', stub.requests.length === reqsBeforeContacts);
     const greenStatus = await getJson(`${BASE}/api/social-call/whatsapp/status`);
     check('green api status route still exists', greenStatus.status !== 404, String(greenStatus.status));
+
+    console.log('\n== stuck calls (HTTP 429) are cleared and the call is retried ==');
+    await getJson(`${BASE}/api/social-call/hangup`, { method: 'POST' });
+    stub.refuseCalls = 1; stub.stuckCalls = 8;
+    const reqsBeforeStuck = stub.requests.length;
+    const afterStuck = await getJson(`${BASE}/api/social-call/call`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: 'whatsapp', provider: 'wacalls', target: '2348012345678', video: true }),
+    });
+    const stuckReqs = stub.requests.slice(reqsBeforeStuck);
+    check('call still goes through after a 429', afterStuck.status === 200 && afterStuck.data.call?.callId === 'call-1', JSON.stringify(afterStuck.data));
+    check('the stuck calls were cleared first (DELETE /calls)', stuckReqs.some((r) => r.method === 'DELETE' && r.path === '/api/sessions/s1/calls'));
+    check('and the placement was retried exactly once', stuckReqs.filter((r) => r.method === 'POST' && r.path === '/api/sessions/s1/calls').length === 2);
+    await getJson(`${BASE}/api/social-call/hangup`, { method: 'POST' });
 
     console.log('\n== per-user WhatsApp sessions ==');
     // No token at all: refused, nothing reaches WaCalls.

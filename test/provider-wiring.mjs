@@ -41,10 +41,15 @@ assert.ok(app.includes('function startSocialCallTimer()'));
 assert.ok(app.includes('showEndToast(lastEndReason)') && app.includes('browser_media_failed'));
 assert.ok(app.includes('function trace(msg)') && app.includes('Copy details'));
 // End-of-call reason is shown immediately (not behind the hangup request) and the hangup can't hang.
-assert.ok(/trace\('call screen closed'\);\s*const waSummaryJob = captureWaAvatarCallForSummary\(\);\s*if \(lastEndReason\) \{ showEndToast/.test(app));
+assert.ok(/trace\('call screen closed'\);\s*resetAvatarGate\(false\);\s*const waSummaryJob = captureWaAvatarCallForSummary\(\);\s*if \(lastEndReason\) \{ showEndToast/.test(app));
 assert.ok(app.includes('sendWaCallSummary(waSummaryJob)') && app.includes('MESSAGE_HISTORY_UPDATED'));
 assert.ok(app.includes('hc.abort(), 6000'));
 assert.ok(app.includes('emptyStops'));
 // Avatar video sent to the callee is read from the visible call-screen element, not the hidden prep one.
 assert.ok(app.includes("if (this.source === 'anam') {") && app.includes('avatar frames are BLACK'));
+// Avatar speech gate, H.264 guard, free test mode
+assert.ok(app.includes('function scheduleAvatarGreeting()') && app.includes('GREETING_DELAY_MS = 5000') && app.includes('notifyCallConnected('));
+assert.ok(app.includes('client.muteInputAudio()'));
+assert.ok(app.includes('function avccToAnnexB(') && app.includes('function h264Format('));
+assert.ok(app.includes('createTestAvatarClient') && app.includes("lc_test_avatar"));
 console.log('provider-wiring: all checks passed');

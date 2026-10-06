@@ -316,6 +316,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   $('closeInfo')?.addEventListener('click', () => $('infoScreen').classList.remove('active'));
 
   const state = {
+    testAvatar: (() => { try { return localStorage.getItem('lc_test_avatar') === '1'; } catch(e){ return false; } })(),
     systemPrompt: '',
     anamAvatarId: '',
     anamAvatarName: '',
@@ -1101,6 +1102,47 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // Pinned (not @latest) so a CDN re-resolve can't slow or break call start, and
   // preloadable: kicked off while the phone is still ringing.
   let _anamSdkPromise = null;
+  // A stand-in for the Anam client that costs nothing: an animated test card with a running clock, and a
+  // beep when the app tells it the call is connected. Same few methods the app uses on the real client, so
+  // the whole call flow (gating, call audio/video, summary) runs unchanged and you can see/hear on the
+  // OTHER phone what the call really delivers.
+  const TEST_EVENTS = { VIDEO_PLAY_STARTED: 'VIDEO_PLAY_STARTED', CONNECTION_CLOSED: 'CONNECTION_CLOSED', SERVER_WARNING: 'SERVER_WARNING', MESSAGE_HISTORY_UPDATED: 'MESSAGE_HISTORY_UPDATED' };
+  function createTestAvatarClient(){
+    const handlers = {}; let raf = 0, stream = null, ac = null, gain = null, t0 = 0, history = [];
+    const emit = (ev, ...a) => (handlers[ev] || []).forEach((f) => { try { f(...a); } catch(e){} });
+    return {
+      addListener(ev, cb){ (handlers[ev] = handlers[ev] || []).push(cb); },
+      getActiveSessionId(){ return 'test-avatar'; },
+      async streamToVideoElement(elementId){
+        const c = document.createElement('canvas'); c.width = 360; c.height = 640; const x = c.getContext('2d'); t0 = Date.now();
+        const draw = () => {
+          const t = (Date.now() - t0) / 1000;
+          const g = x.createLinearGradient(0, 0, 360, 640); g.addColorStop(0, '#ff7a00'); g.addColorStop(1, '#7a2bff');
+          x.fillStyle = g; x.fillRect(0, 0, 360, 640);
+          x.fillStyle = 'rgba(255,255,255,0.9)'; x.beginPath(); x.arc(180 + Math.sin(t * 2) * 110, 320 + Math.cos(t * 1.3) * 140, 70, 0, 7); x.fill();
+          x.fillStyle = '#fff'; x.font = 'bold 44px sans-serif'; x.textAlign = 'center'; x.fillText('TEST AVATAR', 180, 90);
+          x.font = '28px sans-serif'; x.fillText(t.toFixed(1) + ' s', 180, 140);
+          x.font = '20px sans-serif'; x.fillText('edge to edge: corners should be coloured', 180, 610);
+          raf = requestAnimationFrame(draw);
+        };
+        draw();
+        const AC = window.AudioContext || window.webkitAudioContext; ac = new AC(); const dest = ac.createMediaStreamDestination();
+        const osc = ac.createOscillator(); osc.frequency.value = 440; gain = ac.createGain(); gain.gain.value = 0; osc.connect(gain).connect(dest); osc.start();
+        stream = new MediaStream([...c.captureStream(15).getVideoTracks(), ...dest.stream.getAudioTracks()]);
+        const el = document.getElementById(elementId); el.srcObject = stream;
+        try { await el.play(); } catch(e){}
+        setTimeout(() => emit(TEST_EVENTS.VIDEO_PLAY_STARTED), 300);
+      },
+      muteInputAudio(){}, unmuteInputAudio(){},
+      sendUserMessage(){
+        // "Told the call is connected": beep for one second so you can hear when the avatar would start talking.
+        try { if (gain) { gain.gain.setValueAtTime(0.6, ac.currentTime); gain.gain.setValueAtTime(0, ac.currentTime + 1); } } catch(e){}
+        history = [{ role: 'persona', content: '(test avatar: beep - this is where the avatar would greet you)' }];
+        setTimeout(() => emit(TEST_EVENTS.MESSAGE_HISTORY_UPDATED, history), 50);
+      },
+      async stopStreaming(){ cancelAnimationFrame(raf); try { stream && stream.getTracks().forEach((t) => t.stop()); } catch(e){} try { ac && ac.close(); } catch(e){} stream = null; },
+    };
+  }
   function loadAnamSdk(){
     if (!_anamSdkPromise) {
       _anamSdkPromise = import('https://esm.sh/@anam-ai/js-sdk@4.27.1').catch((e) => { _anamSdkPromise = null; throw e; });
@@ -2031,6 +2073,58 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // the regular AI-avatar call screen (which stays exactly as it was).
   // Draws a video into a canvas the way CSS object-fit:cover would: fills the whole canvas,
   // keeps the picture's proportions and crops the overflow (no stretching).
+  // H264-START
+  // ---- H.264 helpers: the call server needs Annex-B (start-code delimited, SPS/PPS before each keyframe) ----
+  function h264Format(b){
+    if (b.length > 3 && b[0] === 0 && b[1] === 0 && (b[2] === 1 || (b[2] === 0 && b[3] === 1))) return 'annexb';
+    return 'avcc';
+  }
+  function h264HasParamSets(b){
+    let sps = false, pps = false;
+    for (let i = 0; i + 4 < b.length && i < 4096; i++) {
+      if (b[i] === 0 && b[i + 1] === 0 && (b[i + 2] === 1 || (b[i + 2] === 0 && b[i + 3] === 1))) {
+        const nal = b[i + (b[i + 2] === 1 ? 3 : 4)] & 0x1f;
+        if (nal === 7) sps = true; if (nal === 8) pps = true;
+      }
+    }
+    return sps && pps;
+  }
+  function avcCParamSets(desc){
+    // avcC: [0]=1 [1..3]=profile/compat/level [4]=0xFC|lenSize-1 [5]=0xE0|numSPS ... then PPS
+    const out = []; if (!desc || desc.length < 8) return out;
+    let o = 5; const nSps = desc[o++] & 0x1f;
+    for (let i = 0; i < nSps && o + 2 <= desc.length; i++) { const l = (desc[o] << 8) | desc[o + 1]; o += 2; out.push(desc.subarray(o, o + l)); o += l; }
+    const nPps = desc[o++] || 0;
+    for (let i = 0; i < nPps && o + 2 <= desc.length; i++) { const l = (desc[o] << 8) | desc[o + 1]; o += 2; out.push(desc.subarray(o, o + l)); o += l; }
+    return out;
+  }
+  function concatNals(nals){
+    let n = 0; nals.forEach((x) => { n += 4 + x.length; });
+    const out = new Uint8Array(n); let o = 0;
+    nals.forEach((x) => { out[o++] = 0; out[o++] = 0; out[o++] = 0; out[o++] = 1; out.set(x, o); o += x.length; });
+    return out;
+  }
+  function prependParamSets(annexb, desc){
+    const ps = concatNals(avcCParamSets(desc));
+    const out = new Uint8Array(ps.length + annexb.length); out.set(ps, 0); out.set(annexb, ps.length); return out;
+  }
+  // Length-prefixed (AVCC) access unit -> Annex-B. Keyframes get SPS/PPS from the avcC description.
+  // Returns null if the bytes do not parse.
+  function avccToAnnexB(b, desc, isKey){
+    const lenSize = (desc && desc.length > 4) ? ((desc[4] & 3) + 1) : 4;
+    const nals = [];
+    if (isKey && desc) avcCParamSets(desc).forEach((x) => nals.push(x));
+    let o = 0;
+    while (o + lenSize <= b.length) {
+      let l = 0; for (let i = 0; i < lenSize; i++) l = (l * 256) + b[o + i];
+      o += lenSize;
+      if (l <= 0 || o + l > b.length) return null;
+      nals.push(b.subarray(o, o + l)); o += l;
+    }
+    if (o !== b.length || !nals.length) return null;
+    return concatNals(nals);
+  }
+  // H264-END
   function drawCover(ctx, vid, cw, ch){
     const vw = vid.videoWidth, vh = vid.videoHeight;
     if (!vw || !vh) { ctx.drawImage(vid, 0, 0, cw, ch); return; }
@@ -2080,6 +2174,17 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     // no call screen, no End button" state).
     gen: 0,
     transcript: [],
+    // Called once the call is connected (+5s). Unmutes what the avatar hears and tells it, in words it
+    // was prepared for (see the [CALL EVENT] rule in lib/anamPrompt.js), that the person is on the line.
+    notifyCallConnected(name, note){
+      const c = this.client; if (!c) return false;
+      try { const cs = CalleeAudioBus.stream && CalleeAudioBus.stream(); if (cs) cs.getAudioTracks().forEach((t) => { t.enabled = true; }); } catch(_){}
+      try { c.unmuteInputAudio(); } catch(_){}
+      const who = name || 'the person you called';
+      const msg = note || `[CALL EVENT] The call has just connected and ${who} is on the line. Say a short, natural hello in your own words, then follow their lead.`;
+      try { c.sendUserMessage(msg); } catch(e){ console.warn('[avatar] could not send the call-connected event:', e && e.message); return false; }
+      return true;
+    },
     getVideoElement(){ return this.videoEl; },
     getStream(){ return this.videoEl && this.videoEl.captureStream ? this.videoEl.captureStream() : null; },
     isActive(){ return !!this.client; },
@@ -2103,10 +2208,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const calleeStream = CalleeAudioBus.stream();
       const vid = $('prepAvatarPreview');
       this.videoEl = vid;
-      if (!state.anamKeySet) throw new Error('Add your Anam API key in Profile settings first.');
-      if (!state.anamAvatarId) throw new Error('Pick an avatar first.');
+      if (!state.testAvatar && !state.anamKeySet) throw new Error('Add your Anam API key in Profile settings first.');
+      if (!state.testAvatar && !state.anamAvatarId) throw new Error('Pick an avatar first.');
       // Token and SDK load in parallel (both are slow on a cold start).
-      const [data, sdk] = await Promise.all([mintAnamSession(), loadAnamSdk()]);
+      const [data, sdk] = state.testAvatar
+        ? [{ sessionToken: 'test' }, { createClient: createTestAvatarClient, AnamEvent: TEST_EVENTS }]
+        : await Promise.all([mintAnamSession(), loadAnamSdk()]);
       if (stale()) throw new Error('Avatar start was cancelled');
       const { createClient, AnamEvent } = sdk;
       const client = createClient(data.sessionToken);
@@ -2153,7 +2260,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         endSocialCall();
       });
       try { client.addListener(AnamEvent.SERVER_WARNING, (m) => console.warn('[avatar] Anam server warning:', m)); } catch(_){}
+      // Gated start: the callee-audio stream carries silence until the call connects, but disable it
+      // outright (and mute the SDK input) so nothing can reach the persona before we say so.
+      const gate = avatarGateActive && !avatarGreeted && !!calleeStream;
+      if (gate) { try { calleeStream.getAudioTracks().forEach((t) => { t.enabled = false; }); } catch(_){} }
       await client.streamToVideoElement('prepAvatarPreview', calleeStream || undefined);
+      if (gate) { try { client.muteInputAudio(); } catch(_){} trace('avatar: started, muted until the call connects'); }
       // "Connected" is not "on screen": make sure video is really playing, otherwise fail now so the
       // caller restarts the avatar (what the second attempt did anyway) instead of calling with nothing.
       await Promise.race([
@@ -2729,6 +2841,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         this.pipStream = canvas.captureStream(15);
         sv.srcObject = this.pipStream;
         sv.dataset.feed = 'peer'; // CSS un-mirrors it (the self-view mirror is for cameras)
+        sv.style.display = ''; // shown only now that there is a picture to show
         const p = sv.play && sv.play(); if (p && p.catch) p.catch(() => {});
         // Keep the canvas in the DOM (some browsers stop capturing a
         // display:none canvas) but invisible: the <video> is what is shown.
@@ -2876,6 +2989,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     encoderError: null,
     encodeTimer: null,
     forceKeyframe: true,
+    kfTimers: [],
+    // The callee's phone shows a spinner until it gets a keyframe it can decode. Ask for one right
+    // away when the call connects and again over the next seconds, instead of leaving it to the 2s cycle.
+    keyframeBurst(){
+      (this.kfTimers || []).forEach(clearTimeout); this.kfTimers = [];
+      [0, 700, 1800, 3500].forEach((ms) => this.kfTimers.push(setTimeout(() => { this.forceKeyframe = true; }, ms)));
+    },
     lastKeyframeAt: 0,
     // Counters, surfaced in the logs so "connected but nothing on screen" is
     // diagnosable without a debugger (same habit as the rest of this call code).
@@ -3135,7 +3255,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
       let encodeErrors = 0;
       this.encoder = new window.VideoEncoder({
-        output: (chunk) => this.sendEncoded(chunk),
+        output: (chunk, meta) => this.sendEncoded(chunk, meta),
         error: (e) => {
           encodeErrors++;
           this.encoderError = e.message || String(e);
@@ -3232,11 +3352,28 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       try { frame.close(); } catch (e) {}
     },
 
-    sendEncoded(chunk){
+    sendEncoded(chunk, meta){
       if (!this.videoDC || this.videoDC.readyState !== 'open') return;
       try {
-        const payload = new Uint8Array(chunk.byteLength);
+        let payload = new Uint8Array(chunk.byteLength);
         chunk.copyTo(payload);
+        // The call server hands these bytes straight to an RTP packetizer that only understands Annex-B.
+        // Some browsers (Safari has been inconsistent about avc.format) hand back length-prefixed AVCC
+        // instead; unconverted, the callee's phone just sits on "loading". Convert, and check keyframes.
+        try {
+          const desc = meta && meta.decoderConfig && meta.decoderConfig.description;
+          if (desc) this.avcDesc = new Uint8Array(desc.buffer ? desc.buffer.slice(desc.byteOffset, desc.byteOffset + desc.byteLength) : desc);
+        } catch (_) {}
+        const fmt = h264Format(payload);
+        if (fmt !== 'annexb') {
+          const conv = avccToAnnexB(payload, this.avcDesc, chunk.type === 'key');
+          if (!this.fmtTraced) { this.fmtTraced = true; trace('video: encoder output is ' + (fmt === 'avcc' ? 'AVCC - converting to Annex-B' : 'UNKNOWN format - converting') + (this.avcDesc ? '' : ' (no decoder config)')); }
+          if (!conv) { if (!this.badFrames) { this.badFrames = 1; trace('video: could not convert an encoder frame - dropped'); } return; }
+          payload = conv;
+        } else if (chunk.type === 'key' && this.avcDesc && !h264HasParamSets(payload)) {
+          payload = prependParamSets(payload, this.avcDesc);
+          if (!this.fmtTraced) { this.fmtTraced = true; trace('video: keyframes lacked SPS/PPS - added'); }
+        } else if (!this.fmtTraced) { this.fmtTraced = true; trace('video: encoder output is Annex-B (ok)'); }
         const out = new Uint8Array(5 + payload.byteLength);
         // bit0 = keyframe, bits1-2 = rotation (0 - the avatar canvas is not
         // rotated), then a uint32 BE timestamp in ms, then the H.264 Annex-B
@@ -3278,7 +3415,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const sent = { ...this.sent };
       const received = { ...this.received };
       this.active = false;
-      this.frameCount = 0; this.darkRuns = 0;
+      (this.kfTimers || []).forEach(clearTimeout); this.kfTimers = [];
+      this.frameCount = 0; this.darkRuns = 0; this.fmtTraced = false; this.badFrames = 0; this.avcDesc = null;
       this.stopSilence();
       clearInterval(this.encodeTimer);
       this.encodeTimer = null;
@@ -3534,6 +3672,27 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // Why the last call ended (set by whatever ended it), shown as a toast once the
   // call screen has closed - the on-screen label used to vanish with the screen.
   let lastEndReason = '', lastRemoteEndReason = '';
+  // ---- avatar speech gate (outgoing WhatsApp avatar calls) -------------------------------
+  // The avatar starts BEFORE the phone rings so it is ready, but it must say nothing until the call
+  // is really connected + 5 seconds, and it must be told when that happens. Until then its input is
+  // muted (so it cannot hear noise and react) and it has been told to stay silent.
+  let avatarGateActive = false, avatarGreeted = false, callConnectedAt = 0, avatarReadyForGreeting = false, greetTimer = null;
+  const GREETING_DELAY_MS = 5000;
+  function resetAvatarGate(on){
+    clearTimeout(greetTimer); greetTimer = null;
+    avatarGateActive = !!on; avatarGreeted = false; callConnectedAt = 0; avatarReadyForGreeting = false;
+  }
+  function scheduleAvatarGreeting(){
+    if (!avatarGateActive || avatarGreeted || !callConnectedAt || !avatarReadyForGreeting || greetTimer) return;
+    const wait = Math.max(0, callConnectedAt + GREETING_DELAY_MS - Date.now());
+    greetTimer = setTimeout(() => {
+      greetTimer = null;
+      if (!avatarGateActive || avatarGreeted) return;
+      avatarGreeted = true;
+      SocialAnamSource.notifyCallConnected((selectedSocialContact && selectedSocialContact.name) || '');
+      trace('avatar: call connected + ' + (GREETING_DELAY_MS / 1000) + 's - listening and told it');
+    }, wait);
+  }
   function noteEndReason(r){ if (r) lastEndReason = String(r); }
   // Timeline of the call ("2.1s avatar: ready"), kept in memory and shown under the
   // end-of-call banner, so one screenshot says what happened and when.
@@ -3747,6 +3906,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       selfVid.className = 'socialPipThumb';
       remoteVid.style.left = ''; remoteVid.style.top = ''; remoteVid.style.right = '';
       selfVid.style.left = ''; selfVid.style.top = ''; selfVid.style.right = '16px';
+      // Avatar calls have no camera of ours, so don't show an empty black window; it appears
+      // (attachToPip) when the person being called sends their own video.
+      selfVid.style.display = (selectedCallSource === 'avatar' && currentSocialPlatform === 'whatsapp' && waEngine() === 'wacalls') ? 'none' : '';
     }
     const cleanName = String(name || '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').trim();
     // The call screen no longer shows the callee's name or the engine pill.
@@ -3787,7 +3949,22 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // next encoded frame. It also sets the default for the next call, and the
   // server records the switch so it shows up in the call log.
   // -------------------------------------------------------------
+  function syncTestModeUi(){
+    const b = $('prepTestModeBtn'), h = $('prepTestModeHint');
+    if (!b) return;
+    const isAvatar = selectedCallSource === 'avatar';
+    b.style.display = isAvatar ? 'block' : 'none';
+    b.textContent = 'Free test (no Anam credit): ' + (state.testAvatar ? 'ON' : 'off');
+    b.style.color = state.testAvatar ? '#7CFFB2' : 'var(--dim)';
+    if (h) h.style.display = (isAvatar && state.testAvatar) ? 'block' : 'none';
+  }
+  $('prepTestModeBtn')?.addEventListener('click', () => {
+    state.testAvatar = !state.testAvatar;
+    try { localStorage.setItem('lc_test_avatar', state.testAvatar ? '1' : '0'); } catch(e){}
+    syncTestModeUi();
+  });
   function syncAvatarSourceUi(){
+    syncTestModeUi();
     const sel = $('socialSourceSelect'), lbl = $('socialSourceLabel');
     if (sel) sel.value = selectedCallSource === 'avatar' ? 'anam' : 'lucy';
     if (lbl) lbl.textContent = selectedCallSource === 'avatar' ? 'Anam' : 'Lucy 2.5';
@@ -3850,6 +4027,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         if (evt.subtype === 'webrtc') return;
         if (evt.subtype !== 'unheld') fireCallAnswered();
         startSocialCallTimer();
+        if (!callConnectedAt) {
+          callConnectedAt = Date.now(); trace('call connected');
+          scheduleAvatarGreeting();
+          WaCallsMediaLeg.keyframeBurst(); // the callee's picture starts on a keyframe, then again shortly after
+        }
         if (lbl) lbl.textContent = 'Connected';
         $('socialCallIdle') && ($('socialCallIdle').style.display = 'none');
         stopRingback();
@@ -5173,6 +5355,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       await withTimeout(SocialAnamSource.start(), 30000, 'Restarting the avatar');
       const voice = await waitForAvatarAudio(8000);
       if (voice) WaCallsMediaLeg.attachOutgoingAudio(voice);
+      if (avatarGateActive && avatarGreeted) {
+        SocialAnamSource.notifyCallConnected('', '[CALL EVENT] You dropped off the line for a moment and are back on the same live call. Carry on naturally from where you were. Do not mention the interruption.');
+      }
       setLbl('Connected');
     } catch(e) {
       showCallFailureAndEnd('Avatar disconnected: ' + why + ' — restart failed: ' + (e && e.message || e));
@@ -5215,6 +5400,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
     try {
       if (avatarOnWaCalls) CalleeAudioBus.start(); // inside the tap, so the audio context is allowed to run
+      resetAvatarGate(avatarOnWaCalls);
       if (!avatarOnWaCalls && !socialMicStream) {
         try {
           socialMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -5254,6 +5440,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const startAvatar = async () => {
         const startedAvatarAt = Date.now();
         setStatus('Starting avatar…');
+        // Only one call runs at a time, so any Anam session that is still open now is a leftover from an
+        // earlier call (page closed, crash, hang-up). Clear them first instead of letting the first
+        // attempt run into the concurrency limit.
+        if (selectedCallSource === 'avatar' && !state.testAvatar) {
+          const pre = await Promise.race([stopAnamSessions(), new Promise((r) => setTimeout(() => r(null), 5000))]);
+          if (cancelled()) return;
+          if (pre && pre.found) await new Promise((r) => setTimeout(r, 1200)); // let Anam register the stop
+        }
         const tick = setInterval(() => {
           if (cancelled()) { clearInterval(tick); return; }
           const l = $('socialCallStatusLabel');
@@ -5299,6 +5493,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           if (cancelled()) return;
           if (voice) WaCallsMediaLeg.attachOutgoingAudio(voice);
           else console.warn('[WaCalls] the avatar produced no audio track - the callee will not hear it');
+          avatarReadyForGreeting = true; scheduleAvatarGreeting();
         }
         } finally { clearInterval(tick); }
       };
@@ -5579,6 +5774,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   async function endSocialCall(){
     callAttemptSeq++; // cancels a placeSocialCall() that is still setting up
     trace('call screen closed');
+    resetAvatarGate(false);
     const waSummaryJob = captureWaAvatarCallForSummary();
     if (lastEndReason) { showEndToast(lastEndReason); lastEndReason = ''; }
     if (waSummaryJob) sendWaCallSummary(waSummaryJob); // fire-and-forget: the push is what reaches you

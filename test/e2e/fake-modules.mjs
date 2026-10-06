@@ -69,14 +69,14 @@ export const AnamEvent = {
   MESSAGE_HISTORY_UPDATED: 'MESSAGE_HISTORY_UPDATED', SESSION_READY: 'SESSION_READY', MESSAGE_STREAM_EVENT_RECEIVED: 'MESSAGE_STREAM_EVENT_RECEIVED',
 };
 const W = window;
-const L = W.__anamLog = W.__anamLog || { attempts: [], live: 0, maxLive: 0, started: 0, stopped: 0, rejected: 0 };
+const L = W.__anamLog = W.__anamLog || { attempts: [], live: 0, maxLive: 0, started: 0, stopped: 0, rejected: 0, muteLog: [], msgs: [] };
 W.__anamCfg = W.__anamCfg || { limit: 1, startDelayMs: 1200, releaseLagMs: 0, failAttempts: [] };
 if (W.__anamCfg.preLive && !W.__preLiveApplied) { W.__preLiveApplied = true; L.live = W.__anamCfg.preLive; } // a session leaked by an earlier call
 W.__anamReleaseAll = () => { const n = L.live; L.live = 0; return n; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export function createClient(token) {
-  const handlers = {}; let mine = false; let stream = null; let id = null; let raf = null;
+  const handlers = {}; let mine = false; let stream = null; let id = null; let raf = null; let gainNode = null; let inAudio = null;
   const emit = (ev, ...a) => (handlers[ev] || []).forEach((f) => { try { f(...a); } catch (e) { console.error(e); } });
   const release = async () => {
     if (!mine) return; mine = false; L.stopped++;
@@ -88,7 +88,7 @@ export function createClient(token) {
     getActiveSessionId() { return id; },
     async streamToVideoElement(elementId, userAudio) {
       const cfg = W.__anamCfg; const n = L.attempts.length + 1;
-      L.attempts.push({ n, t: Date.now(), userAudio: !!userAudio, elementId, live: L.live });
+      L.attempts.push({ n, t: Date.now(), userAudio: !!userAudio, elementId, live: L.live }); inAudio = userAudio || null;
       if (L.live >= cfg.limit) { L.rejected++; throw new Error('Concurrency limit reached, please upgrade your plan'); }
       L.live++; mine = true; L.started++; L.maxLive = Math.max(L.maxLive, L.live); id = 'sess-' + n;
       await sleep(cfg.startDelayMs);
@@ -98,7 +98,7 @@ export function createClient(token) {
       let t0 = 0; const draw = () => { t0 += 1; x.fillStyle = '#ff7a00'; x.fillRect(0, 0, 320, 480); x.fillStyle = '#00d0b0'; x.beginPath(); x.arc(160 + Math.sin(t0 / 8) * 70, 240, 90, 0, 7); x.fill(); raf = requestAnimationFrame(draw); };
       draw();
       const ac = new (W.AudioContext || W.webkitAudioContext)(); const dest = ac.createMediaStreamDestination();
-      const osc = ac.createOscillator(); osc.frequency.value = 440; const g = ac.createGain(); g.gain.value = 0.5; osc.connect(g).connect(dest); osc.start();
+      const osc = ac.createOscillator(); osc.frequency.value = 440; const g = ac.createGain(); g.gain.value = 0; gainNode = g; osc.connect(g).connect(dest); osc.start(); // silent until it is told the call is connected, like the real persona
       stream = new MediaStream([...c.captureStream(15).getVideoTracks(), ...dest.stream.getAudioTracks()]);
       const el = document.getElementById(elementId); el.srcObject = stream; el.muted = true;
       try { await el.play(); } catch (e) {}
@@ -110,7 +110,10 @@ export function createClient(token) {
       ]), 2500);
     },
     async stopStreaming() { cancelAnimationFrame(raf); if (stream) stream.getTracks().forEach((t) => t.stop()); stream = null; await release(); },
-    muteInputAudio() {}, unmuteInputAudio() {}, talk() {}, interruptPersona() {},
+    muteInputAudio() { L.muteLog.push({ t: Date.now(), m: true, trackEnabled: inAudio ? inAudio.getAudioTracks().every((t) => t.enabled) : null }); if (inAudio) inAudio.getAudioTracks().forEach((t) => { t.enabled = false; }); },
+    unmuteInputAudio() { L.muteLog.push({ t: Date.now(), m: false }); if (inAudio) inAudio.getAudioTracks().forEach((t) => { t.enabled = true; }); },
+    sendUserMessage(msg) { L.msgs.push({ t: Date.now(), msg: String(msg).slice(0, 160), audioEnabled: inAudio ? inAudio.getAudioTracks().every((t) => t.enabled) : null }); if (gainNode) gainNode.gain.value = 0.5; /* the persona greets */ },
+    talk() {}, interruptPersona() {},
   };
 }
 `;

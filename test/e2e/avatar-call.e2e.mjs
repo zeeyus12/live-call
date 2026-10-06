@@ -28,16 +28,17 @@ const say = (m) => console.log(`${stamp()}  ${m}`);
 
 // ----------------------------------------------------------------------------- static server
 const CALLEE_HTML = `<!doctype html><meta charset=utf-8><body><canvas id=c width=64 height=64></canvas><script>
-const S = window.stats = { channels: [], videoMsgs: 0, keyMsgs: 0, decoded: 0, bright: 0, dark: 0, lastRGB: null, pcmBytes: 0, pcmLoud: 0, errors: [] };
+const S = window.stats = { firstLoudAt: 0, channels: [], t0: 0, tFirstMsg: 0, tFirstKey: 0, keyTimes: [], videoBytes: 0, lastMsgAt: 0, maxGapMs: 0, videoMsgs: 0, keyMsgs: 0, decoded: 0, bright: 0, dark: 0, lastRGB: null, pcmBytes: 0, pcmLoud: 0, errors: [] };
 let dec = null, gotKey = false; const ctx = document.getElementById('c').getContext('2d', { willReadFrequently: true });
-function mkDecoder(){ dec = new VideoDecoder({ output: (f) => { ctx.drawImage(f, 0, 0, 64, 64); f.close(); const d = ctx.getImageData(0,0,64,64).data; let r=0,g=0,b=0,n=d.length/4; for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2]} r/=n;g/=n;b/=n; S.decoded++; S.lastRGB=[r|0,g|0,b|0]; ((r+g+b)/3>25?S.bright++:S.dark++); }, error: (e) => S.errors.push(String(e)) }); dec.configure({ codec: 'avc1.42E01F', optimizeForLatency: true }); }
-function onVideo(buf){ const b = new Uint8Array(buf); if (b.length < 6) return; S.videoMsgs++; const key = (b[0] & 1) === 1; if (key) { S.keyMsgs++; gotKey = true; } if (!gotKey) return; if (!dec || dec.state === 'closed') mkDecoder();
+function mkDecoder(){ dec = new VideoDecoder({ output: (f) => { ctx.drawImage(f, 0, 0, 64, 64); f.close(); const d = ctx.getImageData(0,0,64,64).data; const cs=[[1,1],[62,1],[1,62],[62,62]].map(([x,y])=>{const i=(y*64+x)*4;return (d[i]+d[i+1]+d[i+2])/3}); S.corners = cs.map(Math.round); if (cs.every((v)=>v>25)) S.edgeOk=(S.edgeOk||0)+1; else S.edgeBad=(S.edgeBad||0)+1;
+let r=0,g=0,b=0,n=d.length/4; for(let i=0;i<d.length;i+=4){r+=d[i];g+=d[i+1];b+=d[i+2]} r/=n;g/=n;b/=n; S.decoded++; S.lastRGB=[r|0,g|0,b|0]; ((r+g+b)/3>25?S.bright++:S.dark++); }, error: (e) => S.errors.push(String(e) + ' @msg' + S.videoMsgs + ' lastKey=' + window.lastKey + ' lastLen=' + window.lastLen) }); dec.configure({ codec: 'avc1.42E01F', optimizeForLatency: true }); }
+function onVideo(buf){ const b = new Uint8Array(buf); if (b.length < 6) return; const now = performance.now(); if (!S.tFirstMsg) S.tFirstMsg = now; if (S.lastMsgAt) S.maxGapMs = Math.max(S.maxGapMs, now - S.lastMsgAt); S.lastMsgAt = now; S.videoBytes += b.length; S.videoMsgs++; const key = (b[0] & 1) === 1; window.lastKey = key; window.lastLen = b.length; if (S.videoMsgs <= 2) S.first = (S.first || []).concat([[key, b.length, Array.from(b.subarray(5, 20)).map((x) => x.toString(16)).join(' ')]]); if (key) { S.keyMsgs++; gotKey = true; S.keyTimes.push(Math.round(now)); if (!S.tFirstKey) S.tFirstKey = now; } if (!gotKey) return; if (!dec || dec.state === 'closed') mkDecoder();
   try { dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ((b[1]<<24)|(b[2]<<16)|(b[3]<<8)|b[4])*1000, data: b.subarray(5) })); } catch (e) { S.errors.push(String(e)); } }
-function onPcm(buf){ S.pcmBytes += buf.byteLength; const v = new Int16Array(buf.slice(0, buf.byteLength & ~1)); let s=0; for (let i=0;i<v.length;i++) s+=v[i]*v[i]; const rms = Math.sqrt(s/Math.max(1,v.length)); if (rms > 300) S.pcmLoud++; }
+function onPcm(buf){ S.pcmBytes += buf.byteLength; const v = new Int16Array(buf.slice(0, buf.byteLength & ~1)); let s=0; for (let i=0;i<v.length;i++) s+=v[i]*v[i]; const rms = Math.sqrt(s/Math.max(1,v.length)); if (rms > 300) { S.pcmLoud++; if (!S.firstLoudAt) S.firstLoudAt = Date.now(); } }
 window.answerOffer = async (sdp) => {
   const pc = new RTCPeerConnection({ iceServers: [] }); window.pc = pc;
   pc.ondatachannel = (e) => { const dc = e.channel; dc.binaryType = 'arraybuffer'; S.channels.push(dc.label);
-    if (dc.label === 'vp8') { dc.onopen = () => dc.send(new Uint8Array([1])); dc.onmessage = (m) => onVideo(m.data); }
+    if (dc.label === 'vp8') { dc.onopen = () => { S.t0 = performance.now(); dc.send(new Uint8Array([1])); }; dc.onmessage = (m) => onVideo(m.data); }
     if (dc.label === 'pcm') dc.onmessage = (m) => onPcm(m.data); };
   await pc.setRemoteDescription({ type: 'offer', sdp });
   const a = await pc.createAnswer(); await pc.setLocalDescription(a);
@@ -73,11 +74,11 @@ const waSrv = http.createServer(async (req, res) => {
   if (p === '/api/sessions') return jsonOut(res, 200, { sessions: sess });
   if (/\/calls$/.test(p) && req.method === 'GET') return jsonOut(res, 200, { active: wa.calls.filter((c) => !c.ended).length, maxCallsPerSession: 8 });
   if (/\/calls$/.test(p) && req.method === 'POST') {
-    const c = { id: 'call-' + (wa.calls.length + 1), ended: false, state: 'ringing', phone: body.phone };
+    const c = { id: 'call-' + (wa.calls.length + 1), ended: false, state: 'ringing', phone: body.phone }; wa.callPostAt = Date.now();
     wa.calls.push(c); const cfg = wa.cfg;
     setTimeout(() => waEmit('call-status', { id: c.id, status: 'ringing', media: 'video', direction: 'outbound' }), 300);
     if (cfg.declineAfterMs) setTimeout(() => { if (c.ended) return; c.ended = true; waEmit('call-ended', { id: c.id, reason: 'declined' }); }, cfg.declineAfterMs);
-    if (cfg.answerAfterMs !== null && !cfg.declineAfterMs) setTimeout(() => { if (c.ended) return; c.state = 'active'; waEmit('call-status', { id: c.id, status: 'connected', media: 'video', direction: 'outbound' }); }, cfg.answerAfterMs ?? 2500);
+    if (cfg.answerAfterMs !== null && !cfg.declineAfterMs) setTimeout(() => { if (c.ended) return; c.state = 'active'; wa.connectedAt = Date.now(); waEmit('call-status', { id: c.id, status: 'connected', media: 'video', direction: 'outbound' }); }, cfg.answerAfterMs ?? 2500);
     return jsonOut(res, 200, { call: { callId: c.id } });
   }
   const m = p.match(/\/calls\/([^/]+)(\/.*)?$/);
@@ -103,14 +104,16 @@ function startServer() {
   return { proc, logs };
 }
 
-async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = 'user', holdMs = 12000 } = {}) {
+async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = 'user', holdMs = 12000, avcc = false, testMode = false } = {}) {
   console.log(`\n=== ${name}`);
-  wa.calls = []; wa.events = []; wa.hangups = 0; wa.cfg = wacalls;
+  wa.calls = []; wa.events = []; wa.hangups = 0; wa.cfg = wacalls; wa.callPostAt = 0; wa.connectedAt = 0;
   calleePage = await browser.newPage(); await calleePage.goto(`http://127.0.0.1:${APP_PORT}/__callee.html`);
   const page = await browser.newPage(); await page.setBypassServiceWorker(true);
   const R = { summaryPosts: [], pageErrors: [], consoleErrors: [], stopActive: 0, anamPosts: [], mic: 0 };
   page.on('pageerror', (e) => R.pageErrors.push(String(e).slice(0, 200)));
   page.on('console', (m) => { const t = m.text(); if (m.type() === 'error') R.consoleErrors.push(t.slice(0, 200)); if (process.env.E2E_VERBOSE) console.log('   [page]', t.slice(0, 200)); });
+  await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+  try { const cdp = await page.createCDPSession(); await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: { top: 47, bottom: 34, left: 0, right: 0 } }); } catch (e) { /* older Chromium: no safe-area emulation */ }
   await page.evaluateOnNewDocument((anamCfg) => {
     window.__anamCfg = { limit: 1, startDelayMs: 1200, releaseLagMs: 0, failAttempts: [], ...anamCfg };
     const RealWS = window.WebSocket;
@@ -120,6 +123,8 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
     const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     window.__gum = 0; navigator.mediaDevices.getUserMedia = (c) => { window.__gum++; return gum(c); };
   }, anam);
+  if (avcc) await page.evaluateOnNewDocument(() => { const c = VideoEncoder.prototype.configure; VideoEncoder.prototype.configure = function (cfg) { const x = { ...cfg }; delete x.avc; return c.call(this, x); }; });
+  if (testMode) await page.evaluateOnNewDocument(() => { try { localStorage.setItem('lc_test_avatar', '1'); } catch (e) {} });
   await page.setRequestInterception(true);
   page.on('request', async (req) => {
     const u = new URL(req.url()); const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' };
@@ -139,7 +144,7 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
           if (u.searchParams.get('resource') === 'avatars') out = { avatars: [{ id: 'av1', name: 'Test avatar' }] };
           else if (u.searchParams.get('resource') === 'voices') out = { voices: [{ id: 'v1', name: 'Test voice' }] };
           else if (u.searchParams.get('type')) out = { id: 'av1', name: 'Test avatar', imageUrl: '' };
-          else if (body.action === 'stop-active') { R.stopActive++; const n = await page.evaluate(() => window.__anamReleaseAll()); out = { found: n, stopped: n }; }
+          else if (body.action === 'stop-active') { R.stopActive++; if (anam.stubborn && R.stopActive === 1) out = { found: 0, stopped: 0 }; else { const n = await page.evaluate(() => window.__anamReleaseAll()); out = { found: n, stopped: n }; } }
           else if (body.action === 'stop') out = { ok: true };
           else { R.anamPosts.push(body.action || 'session'); out = { sessionToken: 'tok-' + R.anamPosts.length }; }
         } else if (u.pathname === '/api/call-summary') { R.summaryPosts.push(body); out = { summary: 'ok' }; }
@@ -177,20 +182,27 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
     prepErr: document.getElementById('prepErrorHint')?.textContent || '',
     toast: document.getElementById('callEndToast')?.style.display === 'block' ? document.getElementById('callEndToast').innerText.slice(0, 400) : '',
   }));
-  let answeredAt = null, endedAt = null;
+  let answeredAt = null, endedAt = null, layout = null;
   while (Date.now() - t0 < holdMs + 20000) {
     const s = await status().catch(() => null); if (!s) break;
     const line = `${s.screen ? 'CALL' : 'prep'} | ${s.label || s.prepErr}`.slice(0, 150);
     if (line !== last) { say('ui: ' + line); last = line; timeline.push([Date.now() - t0, line]); }
     if (s.screen && /connected/i.test(s.label) && !answeredAt) answeredAt = Date.now();
     if (!s.screen && timeline.length > 1 && Date.now() - t0 > 2000 && !endedAt) { endedAt = Date.now(); break; }
+    if (answeredAt && !layout && Date.now() - answeredAt > 4000) {
+      layout = await page.evaluate(() => {
+        const r = (id) => { const e = document.getElementById(id); if (!e) return null; const b = e.getBoundingClientRect(); const cs = getComputedStyle(e); return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height), display: cs.display, fit: cs.objectFit, z: cs.zIndex }; };
+        return { vw: innerWidth, vh: innerHeight, screen: r('socialCallScreen'), remote: r('socialRemoteVideo'), self: r('socialSelfVideo'), peer: r('socialPeerCanvas'), top: r('socialCallTop'), bottom: r('socialCallBottom'), cls: { remote: document.getElementById('socialRemoteVideo').className, self: document.getElementById('socialSelfVideo').className, screenAttr: document.getElementById('socialCallScreen').dataset.layout } };
+      });
+      if (process.env.E2E_SHOT) await page.screenshot({ path: process.env.E2E_SHOT });
+    }
     if (answeredAt && Date.now() - answeredAt > holdMs) break;
     await sleep(250);
   }
   const survived = !endedAt;
   const safe = async (label, fn, dflt) => { try { return await fn(); } catch (e) { console.log(`   (harness: ${label} failed: ${String(e).slice(0, 90)})`); return dflt; } };
   const callee = await safe('callee stats', () => calleePage.evaluate(() => ({ ...window.stats })), { channels: [], videoMsgs: 0, decoded: 0, bright: 0, dark: 0, lastRGB: null, pcmBytes: 0, pcmLoud: 0 });
-  const anamLog = await safe('anam log', () => page.evaluate(() => ({ ...window.__anamLog, attempts: window.__anamLog.attempts.map((a) => ({ n: a.n, userAudio: a.userAudio })) })), { attempts: [], maxLive: 0, rejected: 0, live: -1 });
+  const anamLog = await safe('anam log', () => page.evaluate(() => ({ ...window.__anamLog, attempts: window.__anamLog.attempts.map((a) => ({ n: a.n, t: a.t, userAudio: a.userAudio })) })), { attempts: [], maxLive: 0, rejected: 0, live: -1 });
   const gum = await safe('gum', () => page.evaluate(() => window.__gum), -1);
   const finalUi = await status().catch(() => ({}));
   let toastAfter = '';
@@ -204,7 +216,7 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
   if (process.env.E2E_VERBOSE) console.log('   ws messages:', (await page.evaluate(() => window.__wslog.slice(-8))).join('\n      '));
   if (process.env.E2E_VERBOSE) console.log('   toast dom:', await page.evaluate(() => { const t = document.getElementById('callEndToast'); return t ? t.style.display + ' | ' + t.innerText.slice(0, 120).replace(/\n/g, ' / ') : 'none'; }));
   const calls = wa.calls.length;
-  const res = { name, liveAfter, toastAfter, survived, answered: !!answeredAt, callee, anamLog, gum, calls, summaryPosts: R.summaryPosts, pageErrors: R.pageErrors, finalUi, timeline, callsPlaced: calls, stopActive: R.stopActive };
+  const res = { name, layout, liveAfter, connectedAt: wa.connectedAt, callPostAt: wa.callPostAt, toastAfter, survived, answered: !!answeredAt, callee, anamLog, gum, calls, summaryPosts: R.summaryPosts, pageErrors: R.pageErrors, finalUi, timeline, callsPlaced: calls, stopActive: R.stopActive };
   await page.close(); await calleePage.close();
   return res;
 }
@@ -213,6 +225,9 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
 let failed = 0;
 const check = (ok, what, extra = '') => { console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${what}${!ok && extra ? '  -> ' + extra : ''}`); if (!ok) failed++; };
 function report(r) {
+  const c = r.callee; const spanS = c.lastMsgAt && c.tFirstMsg ? (c.lastMsgAt - c.tFirstMsg) / 1000 : 0;
+  const gaps = c.keyTimes.slice(1).map((t, i) => Math.round((t - c.keyTimes[i]) / 100) / 10);
+  if (spanS > 0) console.log(`  video: first msg ${Math.round(c.tFirstMsg - c.t0)}ms after channel open, first keyframe ${c.tFirstKey ? Math.round(c.tFirstKey - c.t0) + 'ms' : 'NEVER'}, ${c.keyMsgs} keyframe(s) in ${spanS.toFixed(1)}s (gaps ${JSON.stringify(gaps)}s), ${(c.videoMsgs / spanS).toFixed(1)} fps, ${((c.videoBytes * 8) / spanS / 1000).toFixed(0)} kbps, longest silence ${Math.round(c.maxGapMs)}ms`);
   console.log(`  callee got: ${r.callee.videoMsgs} video msgs, ${r.callee.decoded} decoded (${r.callee.bright} bright / ${r.callee.dark} dark), last RGB ${JSON.stringify(r.callee.lastRGB)}, ${r.callee.pcmBytes} audio bytes (${r.callee.pcmLoud} loud chunks)`);
   console.log(`  anam: ${r.anamLog.attempts.length} attempt(s), max ${r.anamLog.maxLive} live at once, ${r.anamLog.rejected} rejected; mic requests: ${r.gum}; calls placed: ${r.calls}`);
 }
@@ -229,7 +244,10 @@ const browser = await puppeteer.launch({ executablePath: await chromium.executab
 const only = process.argv[2];
 const scenarios = {
   happy: ['S1 happy path: avatar starts first try, callee answers', {}],
-  limit1: ['S2 first attempt hits the Anam concurrency limit (leaked session), then recovers', { anam: { preLive: 1 } }],
+  limit1: ['S2 stubborn leak: the cleanup does not free the session at first, the first attempt is refused, then it recovers', { anam: { preLive: 1, stubborn: true } }],
+  preflight: ['S2b a leaked Anam session is cleared BEFORE the first attempt (no refused attempt at all)', { anam: { preLive: 1 } }],
+  avcc: ['S7 the browser encoder outputs AVCC instead of Annex-B (as Safari may): the callee must still get decodable video', { avcc: true, holdMs: 8000 }],
+  testmode: ['S8 free test mode: no Anam at all, callee still sees a picture and hears the beep', { testMode: true, holdMs: 9000 }],
   remote: ['S5 callee hangs up mid-call', { endMode: 'remote', holdMs: 6000 }],
   declined: ['S6 callee declines the call', { wacalls: { declineAfterMs: 2500 }, holdMs: 3000 }],
   dead: ['S3 Anam is unavailable (every attempt fails)', { anam: { failAttempts: [1, 2, 3, 4, 5, 6] } }],
@@ -254,7 +272,29 @@ try {
       check(r.summaryPosts[0]?.platform === 'whatsapp' && r.summaryPosts[0]?.answered === true && r.summaryPosts[0]?.callee === 'Callee Chris' && r.summaryPosts[0]?.durationSec > 3, 'summary request says: WhatsApp, answered, who, how long', JSON.stringify({ ...r.summaryPosts[0], transcript: '...' }));
       check(r.summaryPosts[0]?.transcript?.length >= 2, 'summary request carries the transcript', JSON.stringify(r.summaryPosts[0] || {}).slice(0, 200));
       check(wa.hangups >= 1, 'WhatsApp call was hung up on End');
+      const a1 = r.anamLog.attempts[0];
+      check(a1 && r.callPostAt && a1.t < r.callPostAt, 'the avatar started BEFORE the call was dialled', `avatar ${a1 && a1.t}, dial ${r.callPostAt}`);
+      const firstMute = r.anamLog.muteLog?.[0], unmute = r.anamLog.muteLog?.find((m) => !m.m), msg = r.anamLog.msgs?.[0];
+      check(firstMute && firstMute.m && firstMute.t < r.connectedAt, 'avatar input muted before the call connected', JSON.stringify(r.anamLog.muteLog));
+      check(unmute && unmute.t >= r.connectedAt + 4500 && unmute.t <= r.connectedAt + 8500, 'avatar unmuted ~5s after connect', unmute ? String(unmute.t - r.connectedAt) + 'ms' : 'never');
+      check(msg && /\[CALL EVENT\]/.test(msg.msg) && /connected/.test(msg.msg) && msg.t >= r.connectedAt + 4500, 'avatar told the call is connected, not before +5s', msg ? msg.msg + ' @+' + (msg.t - r.connectedAt) + 'ms' : 'never');
+      check(r.callee.firstLoudAt && r.callee.firstLoudAt >= r.connectedAt + 4500, 'callee hears nothing from the avatar before +5s', r.callee.firstLoudAt ? 'first sound @+' + (r.callee.firstLoudAt - r.connectedAt) + 'ms' : 'never heard');
+      check(r.callee.edge === undefined || r.callee.edge, 'callee picture reaches all four edges (no black bars)', JSON.stringify(r.callee.corners));
       check(r.liveAfter === 0, 'Anam session is released after pressing End (no leak)', 'still live: ' + r.liveAfter);
+    }
+    if (key === 'preflight') {
+      check(r.anamLog.rejected === 0 && r.anamLog.attempts.length === 1, 'first attempt succeeds: nothing refused, one attempt', JSON.stringify({ rejected: r.anamLog.rejected, attempts: r.anamLog.attempts.length }));
+      check(r.stopActive >= 1, 'leftover sessions were cleared before starting');
+      check(r.survived && r.callee.bright > 5, 'call connects and the callee sees the avatar');
+    }
+    if (key === 'avcc') {
+      check(r.callee.decoded > 10 && r.callee.bright > r.callee.dark, 'AVCC encoder output was converted: callee decodes real picture', `decoded=${r.callee.decoded} bright=${r.callee.bright} dark=${r.callee.dark} errors=${JSON.stringify(r.callee.errors)}`);
+      check(r.callee.errors.length === 0, 'no decode errors on the callee');
+    }
+    if (key === 'testmode') {
+      check(r.anamLog.attempts.length === 0, 'no Anam session was used', JSON.stringify(r.anamLog.attempts));
+      check(r.callee.bright > 10 && r.callee.pcmLoud > 3, 'callee sees the test card and hears the beep', `bright=${r.callee.bright} loud=${r.callee.pcmLoud}`);
+      check(r.survived, 'test call stays up');
     }
     if (key === 'limit1') {
       check(r.anamLog.rejected >= 1, 'scenario really hit the Anam concurrency limit', JSON.stringify(r.anamLog));

@@ -26,7 +26,7 @@ assert.ok(/who are you\?/.test(p) && /where is she\?/.test(p) && /without invent
 assert.ok(/on behalf of/.test(p) && /never announce what you are/i.test(p) || /never announce what you are/.test(p));
 // identity + situation come from the configured caller and call, not hardcoded
 const withId = buildSystemPrompt(brief, '', { callerName: 'Dayo', callContext: { direction: 'outgoing', platform: 'whatsapp', otherName: 'John' } });
-assert.ok(withId.includes('You are Dayo') && withId.includes('You called John') && withId.includes('WhatsApp video call'));
+assert.ok(withId.includes('You are Dayo') && withId.includes('placing a real WhatsApp video call to John') && withId.includes('WhatsApp video call'));
 const inc = buildSystemPrompt(brief, '', { callContext: { direction: 'incoming', platform: 'whatsapp', otherName: 'Ada' } });
 assert.ok(inc.includes('Ada called you and you picked up') && !inc.includes('# Who you are\n'));
 assert.ok(!buildSystemPrompt(brief, '', { callerName: '  ' }).includes('# Who you are\n'));
@@ -55,5 +55,10 @@ assert.ok(/hmm/.test(p) && /haha/.test(p) && /sigh/.test(p) && /giggle/.test(p) 
 console.log('anam-prompt: realism checks passed');
 
 assert.ok(/answer their hello with a hello of your own/.test(p) && /pleasantries before anything from the brief/.test(p) && /never as the first thing you say/.test(p) && /time limit/.test(p));
-assert.ok(/Let them speak first/.test(buildSystemPrompt(brief,'',{callContext:{direction:'outgoing',platform:'whatsapp',otherName:'John'}})));
+const outP = buildSystemPrompt(brief,'',{callContext:{direction:'outgoing',platform:'whatsapp',otherName:'John'}});
+assert.ok(/NOT connected yet/.test(outP) && /\[CALL EVENT\]/.test(outP) && /Say nothing and do nothing/.test(outP));
+assert.ok(/Let them speak first/.test(buildSystemPrompt(brief,'',{callContext:{direction:'incoming',platform:'whatsapp',otherName:'John'}})));
+// never fills silence / comments on the line
+assert.ok(/are we doing silence now/.test(p) && /Never comment on silence/.test(p) && /don't leave me hanging/.test(p));
+assert.ok(/never read them out/.test(p) && /not from the person/.test(p));
 console.log('anam-prompt: opening/pleasantries checks passed');

@@ -290,10 +290,21 @@ export async function startCall({ target, video = true, name = null } = {}) {
   const phone = String(target || '').replace(/\D/g, '');
   if (phone.length < 7) throw new Error('WaCalls call needs a phone number (E.164 digits, e.g. 2348012345678).');
 
-  const r = await apiFetch(`/api/sessions/${sessionId}/calls`, {
+  let r = await apiFetch(`/api/sessions/${sessionId}/calls`, {
     method: 'POST',
     body: { phone, video: !!video },
   });
+  // 429 "max concurrent calls" / 409 "operator already on a call" mean WaCalls still counts earlier
+  // calls that are in fact over (a hang-up that never completed). One user's session only ever has
+  // one real call at a time, so clear the stuck ones and try again once instead of failing the call.
+  if (!r.ok && (r.status === 429 || r.status === 409)) {
+    const cl = await apiFetch(`/api/sessions/${sessionId}/calls`, { method: 'DELETE' });
+    warn(`WaCalls refused the call (HTTP ${r.status}: ${r.data?.error}); cleared ${cl.data?.cleared ?? '?'} stuck call(s) and retrying`);
+    if (cl.ok) {
+      await new Promise((res) => setTimeout(res, 600));
+      r = await apiFetch(`/api/sessions/${sessionId}/calls`, { method: 'POST', body: { phone, video: !!video } });
+    }
+  }
   if (!r.ok || !r.data?.call?.callId) {
     throw new Error(`WaCalls call failed (HTTP ${r.status}): ${r.data?.error || 'no call id returned'}`);
   }
