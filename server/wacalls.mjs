@@ -118,12 +118,29 @@ async function apiFetch(path, { method = 'GET', body = null, timeoutMs = CONFIG.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
-      method,
-      headers: headers(body !== null),
-      body: body === null ? undefined : JSON.stringify(body),
-      signal: controller.signal,
-    });
+    let res;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: headers(body !== null),
+        body: body === null ? undefined : JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        // WaCalls is on a host that sleeps when idle, so the first request after a break can be slow.
+        // Reads are safe to repeat: try once more with twice the time. Writes are not (a call may
+        // already exist), so those fail with a clear message instead of a bare "operation was aborted".
+        if (method === 'GET' && !_retried) {
+          warn(`${method} ${path} timed out after ${timeoutMs / 1000}s (WaCalls may be waking up); retrying once`);
+          return apiFetch(path, { method, body, timeoutMs: timeoutMs * 2, _retried: true });
+        }
+        const err = new Error(`WaCalls did not answer within ${Math.round(timeoutMs / 1000)}s (it may be waking up) - please try again`);
+        err.code = 'timeout';
+        throw err;
+      }
+      throw e;
+    }
     const text = await res.text();
     let data = {};
     if (text) {
@@ -206,7 +223,7 @@ export async function resolveSession({ force = false } = {}) {
     const wanted = SESSION_PREFIX + uid;
     const mine = sessions.find((x) => x.name === wanted);
     if (mine) { setCache(mine.id); return mine.id; }
-    const made = await apiFetch('/api/sessions', { method: 'POST', body: { name: wanted } });
+    const made = await apiFetch('/api/sessions', { method: 'POST', body: { name: wanted }, timeoutMs: 30000 });
     if (!made.ok || !made.data?.id) {
       throw new Error(`WaCalls could not create your session (HTTP ${made.status}): ${made.data?.error || 'no detail'}`);
     }
@@ -293,6 +310,7 @@ export async function startCall({ target, video = true, name = null } = {}) {
   let r = await apiFetch(`/api/sessions/${sessionId}/calls`, {
     method: 'POST',
     body: { phone, video: !!video },
+    timeoutMs: 40000, // placing a call can take a while when WaCalls has just woken up
   });
   // 429 "max concurrent calls" / 409 "operator already on a call" mean WaCalls still counts earlier
   // calls that are in fact over (a hang-up that never completed). One user's session only ever has
@@ -302,7 +320,7 @@ export async function startCall({ target, video = true, name = null } = {}) {
     warn(`WaCalls refused the call (HTTP ${r.status}: ${r.data?.error}); cleared ${cl.data?.cleared ?? '?'} stuck call(s) and retrying`);
     if (cl.ok) {
       await new Promise((res) => setTimeout(res, 600));
-      r = await apiFetch(`/api/sessions/${sessionId}/calls`, { method: 'POST', body: { phone, video: !!video } });
+      r = await apiFetch(`/api/sessions/${sessionId}/calls`, { method: 'POST', body: { phone, video: !!video }, timeoutMs: 40000 });
     }
   }
   if (!r.ok || !r.data?.call?.callId) {

@@ -5526,7 +5526,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       trace('placing the call');
       // Place call on backend bridge
       const ctl = new AbortController();
-      const placeTimer = setTimeout(() => ctl.abort(), 25000);
+      const placeTimer = setTimeout(() => ctl.abort(), 55000); // longer than the server's own 40s wait
       let res;
       try {
         res = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/call', {
@@ -5547,7 +5547,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
           }),
         });
       } catch (e) {
-        throw new Error(e.name === 'AbortError' ? 'Placing the call timed out after 25s' : e.message);
+        throw new Error(e.name === 'AbortError' ? 'Placing the call timed out after 55s - the server may be waking up, try again' : e.message);
       } finally { clearTimeout(placeTimer); }
 
       const data = await res.json();
