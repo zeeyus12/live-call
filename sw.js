@@ -1,8 +1,9 @@
-const CACHE = 'live-call-v18';
-const SHELL = ['./', './index.html', './styles.css', './app.js', './boot.js', './manifest.json', './icon-192.png', './icon-512.png'];
+const CACHE = 'live-call-static';
+const SHELL = ['./', './index.html', './styles.css', './app.js', './boot.js', './manifest.json', './icon-192.png', './icon-512.png', './logo.png'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+  // One file failing to download must not stop the others being cached (addAll is all-or-nothing).
+  e.waitUntil(caches.open(CACHE).then((c) => Promise.all(SHELL.map((u) => c.add(u).catch(() => {})))));
   self.skipWaiting();
 });
 self.addEventListener('activate', (e) => {
@@ -19,11 +20,10 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(
       fetch(e.request)
         .then((res) => {
-          const clone = res.clone();
-          caches.open(CACHE).then((c) => c.put(e.request, clone));
+          if (res && res.ok && e.request.method === 'GET') { const clone = res.clone(); caches.open(CACHE).then((c) => c.put(e.request, clone)); }
           return res;
         })
-        .catch(() => caches.match(e.request))
+        .catch(() => caches.match(e.request, { ignoreSearch: true }))
     );
   }
 });

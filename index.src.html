@@ -19,7 +19,7 @@
 <body>
 
 <div id="installGate" style="display:none; position:fixed; inset:0; z-index:99999; background:var(--coffee); flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:32px;">
-  <img src="logo.png" alt="" style="width:64px; height:64px; margin-bottom:20px;" />
+  <img src="logo.png" onerror="this.onerror=null;this.src='icon-192.png'" alt="" style="width:64px; height:64px; margin-bottom:20px;" />
   <div style="font-size:22px; font-weight:700; margin-bottom:10px;">Add Live Call to your Home Screen</div>
   <div style="font-size:15px; color:var(--dim); line-height:1.5; max-width:340px; margin-bottom:28px;">This app only works when installed — it needs to run full-screen, not inside a browser tab.</div>
   <div id="installGateStepsIOS" style="display:none; text-align:left; max-width:320px; font-size:14.5px; line-height:1.7; color:#fff;">
@@ -38,9 +38,9 @@
 
 <div id="deviceFrame">
 <div id="authScreen">
-  <div id="authBoot"><img src="logo.png" alt="" /></div>
+  <div id="authBoot"><img src="logo.png" onerror="this.onerror=null;this.src='icon-192.png'" alt="" /></div>
   <div id="authBox" style="display:none;">
-    <img id="authLogo" src="logo.png" alt="Live Call" />
+    <img id="authLogo" src="logo.png" onerror="this.onerror=null;this.src='icon-192.png'" alt="Live Call" />
     <div id="authTitle">Live Call</div>
     <div id="authSubtitle">Sign in to brief and start your call</div>
 
@@ -64,7 +64,7 @@
     <p class="hint" id="authHint"></p>
   </div>
   <div id="pendingBox" style="display:none; text-align:center; max-width:320px;">
-    <img id="authLogo" src="logo.png" alt="Live Call" style="width:52px; height:52px;" />
+    <img id="authLogo" src="logo.png" onerror="this.onerror=null;this.src='icon-192.png'" alt="Live Call" style="width:52px; height:52px;" />
     <div id="authTitle">Pending approval</div>
     <div id="authSubtitle">Your account is created — an admin needs to approve it before you can start calls. Check back soon.</div>
     <button id="pendingSignOut" style="width:100%; padding:13px; border-radius:12px; background:var(--panel); color:#fff; font-weight:600; font-size:14px; border:1px solid var(--line);">Sign out</button>
@@ -106,7 +106,7 @@
         <button id="newChatBtn" aria-label="New chat">
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
         </button>
-        <img id="headerLogo" src="logo.png" alt="Live Call" />
+        <img id="headerLogo" src="logo.png" onerror="this.onerror=null;this.src='icon-192.png'" alt="Live Call" />
 
         <button id="headerCallBtn" aria-label="Start call">
           <svg viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg"><path fill="var(--accent)" d="M8,12h22c2.2,0,4,1.8,4,4v16c0,2.2-1.8,4-4,4H8c-2.2,0-4-1.8-4-4V16C4,13.8,5.8,12,8,12z"></path><polygon fill="var(--accent)" opacity="0.7" points="44,35 34,29 34,19 44,13"></polygon></svg>
@@ -830,7 +830,7 @@
           <video id="prepAvatarPreview" autoplay playsinline muted style="width:100%; height:100%; object-fit:cover; display:none;"></video>
           <div id="prepAvatarPlaceholder" style="text-align:center; padding:20px;">
             <div class="pulseCircle" style="margin:0 auto 10px;">
-              <img src="logo.png" alt="" />
+              <img src="logo.png" onerror="this.onerror=null;this.src='icon-192.png'" alt="" />
             </div>
             <div style="font-size:13px; color:var(--dim);" id="prepPreviewPlaceholderLabel">Lucy 2.5 Live Swap Preview</div>
           </div>
@@ -946,7 +946,7 @@
 
   <div id="callIdle">
     <div id="callPulse">
-      <img src="logo.png" alt="" />
+      <img src="logo.png" onerror="this.onerror=null;this.src='icon-192.png'" alt="" />
     </div>
     <div id="callConfirm"></div>
     <div id="callStatus">Connecting…</div>
@@ -972,7 +972,7 @@
 
   <div id="lfIdle">
     <div id="lfPulse" class="pulseCircle">
-      <img src="logo.png" alt="" />
+      <img src="logo.png" onerror="this.onerror=null;this.src='icon-192.png'" alt="" />
     </div>
     <div id="lfStatus">Connecting…</div>
     <button type="button" id="lfRetryBtn" class="lfStartBtn" style="display:none; margin-top:14px; padding:10px 26px; font-size:14px; width:auto;">Try again</button>
@@ -1058,7 +1058,7 @@
 
   <div id="socialCallIdle" style="display:none; position:absolute; inset:0; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:32px;">
     <div class="pulseCircle" style="margin-bottom:14px;">
-      <img src="logo.png" alt="" />
+      <img src="logo.png" onerror="this.onerror=null;this.src='icon-192.png'" alt="" />
     </div>
     <div id="socialCallIdleStatus" style="font-size:15px; font-weight:600; color:#fff;">Connecting social call…</div>
     <div id="socialCallIdleSub" style="font-size:12.5px; color:var(--dim); margin-top:4px;">Setting up the avatar video stream</div>

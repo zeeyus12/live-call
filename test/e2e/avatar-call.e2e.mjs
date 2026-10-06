@@ -241,6 +241,23 @@ const browser = await puppeteer.launch({ executablePath: await chromium.executab
   args: [...chromium.args.filter((a) => !/single-process|no-zygote/.test(a)), '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required',
     '--disable-features=WebRtcHideLocalIpsWithMdns', '--no-sandbox', '--allow-loopback-in-peer-connection'] });
 
+// ---- the logo must always show: normally, and via the icon fallback when logo.png fails to load ----
+async function logoCheck(browser, blockLogo) {
+  const page = await browser.newPage(); await page.setBypassServiceWorker(true); await page.setViewport({ width: 390, height: 844 });
+  await page.setRequestInterception(true);
+  page.on('request', (req) => {
+    const u = new URL(req.url());
+    if (u.hostname === 'esm.sh') return req.respond({ status: 200, contentType: 'application/javascript', headers: { 'access-control-allow-origin': '*' }, body: u.pathname.includes('supabase') ? FAKE_SUPABASE : u.pathname.includes('anam') ? FAKE_ANAM : 'export {}' });
+    if (u.origin === `http://127.0.0.1:${APP_PORT}` && u.pathname === '/logo.png' && blockLogo) return req.abort();
+    if (u.origin === `http://127.0.0.1:${APP_PORT}` && u.pathname.startsWith('/api/')) return req.respond({ status: 200, contentType: 'application/json', body: '{}' });
+    if (u.origin === `http://127.0.0.1:${APP_PORT}`) return req.continue();
+    return req.respond({ status: 200, body: '' });
+  });
+  await page.goto(`http://127.0.0.1:${APP_PORT}/index.html`);
+  await sleep(2500);
+  const imgs = await page.evaluate(() => [...document.querySelectorAll('img')].filter((i) => /logo|icon-192/.test(i.getAttribute('src') || '')).map((i) => ({ src: i.getAttribute('src'), ok: i.complete && i.naturalWidth > 0 })));
+  await page.close(); return imgs;
+}
 const only = process.argv[2];
 const scenarios = {
   happy: ['S1 happy path: avatar starts first try, callee answers', {}],
@@ -255,8 +272,15 @@ const scenarios = {
 };
 const all = {};
 try {
+  if (!only || only === 'logo') {
+    console.log('\n=== S9 logo images always show');
+    const normal = await logoCheck(browser, false); const blocked = await logoCheck(browser, true);
+    check(normal.length > 0 && normal.every((i) => i.ok), 'every logo image loads normally', JSON.stringify(normal.filter((i) => !i.ok)));
+    check(blocked.length > 0 && blocked.every((i) => i.ok), 'if logo.png fails, the icon fallback shows instead of a broken-image box', JSON.stringify(blocked.filter((i) => !i.ok)));
+  }
+  if (only === 'logo') { /* only this one */ }
   for (const [key, [title, opts]] of Object.entries(scenarios)) {
-    if (only && only !== key) continue;
+    if (only && only !== key) continue; if (only === 'logo') continue;
     if (opts.anam?.preLive) { /* handled below via init script */ }
     const r = await runScenario(browser, title, opts); all[key] = r; report(r);
     if (key === 'happy') {
