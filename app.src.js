@@ -3109,7 +3109,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         this.pcmDC = pcmDC;
 
         if (this.video) {
-          const videoDC = pc.createDataChannel('vp8', { ordered: true });
+          // Video must not be sent reliably and in order: on a phone connection one lost packet then holds
+          // every later frame back (reliable delivery waits for the resend), latency builds up (the callee's lag) and the picture finally stalls on a
+          // spinner. Frames stay in order but a frame older than 200ms is dropped instead of resent.
+          const videoDC = pc.createDataChannel('vp8', { ordered: true, maxPacketLifeTime: 200 });
           videoDC.binaryType = 'arraybuffer';
           videoDC.onmessage = (e) => this.onVideoMessage(e.data);
           this.videoDC = videoDC;
@@ -3447,7 +3450,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (!this.active || this.video) return;
       if (!this.supported()) throw new Error(this.supportedDetail());
       this.video = true;
-      const videoDC = this.pc.createDataChannel('vp8', { ordered: true });
+      const videoDC = this.pc.createDataChannel('vp8', { ordered: true, maxPacketLifeTime: 200 });
       videoDC.binaryType = 'arraybuffer';
       videoDC.onmessage = (e) => this.onVideoMessage(e.data);
       this.videoDC = videoDC;
