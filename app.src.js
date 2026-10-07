@@ -316,7 +316,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   $('closeInfo')?.addEventListener('click', () => $('infoScreen').classList.remove('active'));
 
   const state = {
-    testAvatar: (() => { try { return localStorage.getItem('lc_test_avatar') === '1'; } catch(e){ return false; } })(),
+    testAvatar: (() => { try { localStorage.removeItem('lc_test_avatar'); } catch(e){} return false; })(),
     systemPrompt: '',
     anamAvatarId: '',
     anamAvatarName: '',
@@ -3250,10 +3250,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         return;
       }
       this.canvas = document.createElement('canvas');
-      // Tall, phone-screen proportions (about 9:19.5): the callee's WhatsApp shows the picture at its own
-      // aspect ratio, so a 3:4 frame is letterboxed with black bars above and below. This fills the screen.
-      this.canvas.width = 352;
-      this.canvas.height = 768;
+      // 480x640 is the size the call server (server/wacalls.md) and WhatsApp are known to accept. A taller
+      // frame (352x768) left the callee on a loading spinner, so the picture is cropped to fill THIS frame.
+      this.canvas.width = 480;
+      this.canvas.height = 640;
       this.ctx = this.canvas.getContext('2d');
 
       let encodeErrors = 0;
@@ -3909,9 +3909,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       selfVid.className = 'socialPipThumb';
       remoteVid.style.left = ''; remoteVid.style.top = ''; remoteVid.style.right = '';
       selfVid.style.left = ''; selfVid.style.top = ''; selfVid.style.right = '16px';
-      // Avatar calls have no camera of ours, so don't show an empty black window; it appears
-      // (attachToPip) when the person being called sends their own video.
-      selfVid.style.display = (selectedCallSource === 'avatar' && currentSocialPlatform === 'whatsapp' && waEngine() === 'wacalls') ? 'none' : '';
+      selfVid.style.display = '';
     }
     const cleanName = String(name || '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').trim();
     // The call screen no longer shows the callee's name or the engine pill.
@@ -3952,20 +3950,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // next encoded frame. It also sets the default for the next call, and the
   // server records the switch so it shows up in the call log.
   // -------------------------------------------------------------
-  function syncTestModeUi(){
-    const b = $('prepTestModeBtn'), h = $('prepTestModeHint');
-    if (!b) return;
-    const isAvatar = selectedCallSource === 'avatar';
-    b.style.display = isAvatar ? 'block' : 'none';
-    b.textContent = 'Free test (no Anam credit): ' + (state.testAvatar ? 'ON' : 'off');
-    b.style.color = state.testAvatar ? '#7CFFB2' : 'var(--dim)';
-    if (h) h.style.display = (isAvatar && state.testAvatar) ? 'block' : 'none';
-  }
-  $('prepTestModeBtn')?.addEventListener('click', () => {
-    state.testAvatar = !state.testAvatar;
-    try { localStorage.setItem('lc_test_avatar', state.testAvatar ? '1' : '0'); } catch(e){}
-    syncTestModeUi();
-  });
+  function syncTestModeUi(){}
   function syncAvatarSourceUi(){
     syncTestModeUi();
     const sel = $('socialSourceSelect'), lbl = $('socialSourceLabel');
