@@ -129,11 +129,12 @@
           <span class="creditValue" id="creditFalValue">—</span>
           <span class="creditSub" id="creditFalSub">&nbsp;</span>
         </button>
-        <button type="button" class="creditCard" id="creditMinutes">
+        <div class="creditCard" id="creditMinutes" role="button" tabindex="0">
           <span class="creditLabel">Minutes</span>
           <span class="creditValue" id="creditMinutesValue">—</span>
           <span class="creditSub" id="creditMinutesSub">&nbsp;</span>
-        </button>
+          <button type="button" id="buyMinutesBtn" aria-label="Buy more minutes"><svg viewBox="0 0 24 24" width="14" height="14" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></button>
+        </div>
       </div>
 
       <div id="homeHero">
@@ -158,8 +159,8 @@
             <img id="homeAvatarImg" style="display:none;" alt="" />
             <div class="tileEmpty" id="homeAvatarEmpty"><svg viewBox="0 0 24 24" fill="none" width="26" height="26"><path d="M4 8a2 2 0 0 1 2-2h1.5l1-1.5h7l1 1.5H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.2" stroke="currentColor" stroke-width="1.6"/></svg><span>Add photo</span></div>
             <div class="tileBusy" id="homeAvatarBusy" style="display:none;"></div>
-            <button type="button" class="tileBadge" id="homeAvatarUpload" aria-label="Upload avatar photo" style="display:none;">
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+            <button type="button" class="tileBadge danger" id="homeAvatarDelete" aria-label="Delete avatar" style="display:none;">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
             </button>
           </div>
           <div class="tileName">Avatar</div>
@@ -283,6 +284,7 @@
             <option value="coffee-emerald">Coffee &amp; Emerald</option>
             <option value="midnight-cyan">Midnight &amp; Cyan</option>
             <option value="forest-gold">Forest &amp; Gold</option>
+            <option value="very-dark">Very Dark</option>
           </select>
         </div>
       </div>
@@ -418,9 +420,9 @@
         </div>
         <div class="cBody">
           <div class="cValue">Telegram</div>
-          <div class="hint" id="telegramAccountStatus">Coming soon</div>
+          <div class="hint" id="telegramAccountStatus">Not connected</div>
         </div>
-        <span class="accountBadge" id="telegramAccountBadge">Coming soon</span>
+        <span class="accountBadge" id="telegramAccountBadge">Connect</span>
         <svg class="cChev" viewBox="0 0 24 24" width="16" height="16"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
       </div>
@@ -995,7 +997,7 @@
 
   </div>
 
-  <div id="homeInputBar" class="visible">
+  <div id="homeInputBar">
     <textarea id="briefInput" rows="1" placeholder="Tell it what to do…" enterkeyhint="go"></textarea>
     <button id="sendBtn" aria-label="Send">
       <svg viewBox="0 0 24 24" fill="none"><path d="M3 11L21 3L13 21L11 13L3 11Z" fill="white"/></svg>
@@ -1099,7 +1101,7 @@
       </div>
       <div style="flex:1; text-align:left;">
         <div style="font-size:15px; font-weight:600;">Telegram</div>
-        <div style="font-size:12px; color:var(--dim);" id="choiceTelegramSubtitle">Coming soon</div>
+        <div style="font-size:12px; color:var(--dim);" id="choiceTelegramSubtitle">Live Video Call with Lucy 2.5</div>
       </div>
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
     </button>

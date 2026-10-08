@@ -793,6 +793,16 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   });
 
   // ---------------------------------------------------------------- Anam custom avatar photo
+  // Anam renders the avatar image shortly after creation: re-read the list until it has one, so the hero shows Anam's version.
+  async function waitForAnamAvatarImage(id){
+    for (let i = 0; i < 8; i++) {
+      await loadAnamAvatars();
+      if (state.anamAvatarId !== id) return;
+      const hit = anamAvatarList.find(a => a.id === id);
+      if (hit && hit.image_url) return;
+      await new Promise(res => setTimeout(res, 2500));
+    }
+  }
   $('openAvatarUpload')?.addEventListener('click', () => $('avatarPhotoInput').click());
   $('avatarPhotoInput')?.addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -829,8 +839,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       try { localStorage.setItem(avPhotoKey(), JSON.stringify({ id: data.id, url: pub.publicUrl })); } catch(_){}
       await persist();
       statusEl.textContent = 'Saved — ' + data.name;
-      loadAnamAvatars();
       updateAnamAvatarSummary();
+      waitForAnamAvatarImage(data.id);
     } catch (err) {
       statusEl.textContent = 'Failed: ' + (err.message || err);
     }
@@ -4308,7 +4318,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       }
 
       // Telegram status
-      const tg = {}; // Telegram: coming soon, ignore bridge status
+      const tg = data.telegram || {};
       const tgStatusEl = $('telegramAccountStatus');
       const tgBadgeEl = $('telegramAccountBadge');
       if (tg.connected && tg.user) {
@@ -4326,16 +4336,16 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         $('tgConnectedView').style.display = 'block';
         $('choiceTelegramSubtitle').textContent = `Connected (${disp})`;
       } else {
-        if (tgStatusEl) tgStatusEl.textContent = 'Coming soon';
+        if (tgStatusEl) tgStatusEl.textContent = 'Not connected';
         if (tgBadgeEl) {
-          tgBadgeEl.textContent = 'Coming soon';
+          tgBadgeEl.textContent = 'Connect';
           tgBadgeEl.classList.remove('connected');
         }
         $('tgDetailStatus').textContent = 'Disconnected';
         $('tgDetailSub').textContent = 'Enter phone number to receive login code';
         $('tgNotConnectedView').style.display = 'block';
         $('tgConnectedView').style.display = 'none';
-        $('choiceTelegramSubtitle').textContent = 'Coming soon';
+        $('choiceTelegramSubtitle').textContent = 'Live Video Call with Lucy 2.5';
       }
     } catch(err){
       console.warn('[fetchConnectedStatus] note:', err.message);
@@ -4420,7 +4430,6 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
   // Profile -> Telegram
   $('openTelegramConnect')?.addEventListener('click', () => {
-    return; // Telegram: coming soon
     $('telegramConnectScreen').classList.add('active');
     fetchConnectedStatus();
     fetchP2pStatus();
@@ -4630,7 +4639,6 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   });
 
   $('chooseTelegramCallBtn')?.addEventListener('click', () => {
-    return; // Telegram: coming soon
     $('callChoiceModal').classList.remove('active');
     openContactPicker('telegram');
   });
@@ -5986,7 +5994,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     const has = setTileImage(avImg, src, localAvatarPhoto());
     $('homeAvatarEmpty').style.display = has ? 'none' : 'flex';
     $('homeAvatarEmpty').querySelector('span').textContent = state.anamAvatarId ? (state.anamAvatarName || 'Avatar ready') : 'Add photo';
-    $('homeAvatarUpload').style.display = state.anamAvatarId ? 'flex' : 'none';
+    $('homeAvatarDelete').style.display = state.anamAvatarId ? 'flex' : 'none';
     const bg = $('homeHeroBg');
     if (bg) { bg.style.backgroundImage = has ? `url("${src}")` : ''; bg.classList.toggle('on', has); }
 
@@ -6031,7 +6039,28 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     if (state.anamAvatarId) $('openAnamAvatarScreen').click();
     else pickAvatarPhoto();
   });
-  $('homeAvatarUpload')?.addEventListener('click', (e) => { e.stopPropagation(); pickAvatarPhoto(); });
+  async function deleteHomeAvatar(){
+    if (!state.anamAvatarId) return;
+    if (!confirm(`Delete "${state.anamAvatarName || 'this avatar'}" from your Anam account? This can't be undone.`)) return;
+    const busy = $('homeAvatarBusy');
+    busy.textContent = 'Deleting…'; busy.style.display = 'block';
+    try {
+      const r = await fetch(`/api/anam?type=avatar&id=${encodeURIComponent(state.anamAvatarId)}`, { method: 'DELETE', headers: await authHeader() });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { busy.style.display = 'none'; tileNote('homeAvatarBusy', 'Delete failed: ' + String(JSON.stringify(data.error) || r.status).slice(0, 80)); return; }
+      anamAvatarList = anamAvatarList.filter(a => a.id !== state.anamAvatarId);
+      try { localStorage.removeItem(avPhotoKey()); } catch (_) {}
+      state.anamAvatarId = ''; state.anamAvatarName = '';
+      await persist();
+      busy.style.display = 'none';
+      updateAnamAvatarSummary();
+      loadAnamAvatars();
+    } catch (err) {
+      busy.style.display = 'none';
+      tileNote('homeAvatarBusy', 'Delete failed');
+    }
+  }
+  $('homeAvatarDelete')?.addEventListener('click', (e) => { e.stopPropagation(); deleteHomeAvatar(); });
 
   // ---- Live Swap tile: reference photo kept on this device until the person removes it
   function makeThumb(file, max = 480){
@@ -6107,11 +6136,19 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     credits.busy = true;
     ['Anam', 'Fal', 'Minutes'].forEach(k => $('credit' + k)?.classList.add('loading'));
 
-    // Anam has no public balance endpoint yet, so this card reflects key status and links to the Lab.
-    if (state.anamKeySet) setCredit('Anam', 'Linked', 'Tap to open Anam Lab');
-    else setCredit('Anam', '—', 'Add your key', 'warn');
-
     const headers = { ...(await authHeader()) };
+    // Anam has no balance endpoint, so this sums the key's own session time for the current month.
+    const anam = (async () => {
+      if (!state.anamKeySet) { setCredit('Anam', '—', 'Add your key', 'warn'); return; }
+      try {
+        const r = await fetch('/api/keys?balance=anam', { headers });
+        const d = await r.json();
+        if (typeof d.usedMinutes === 'number') {
+          const n = d.usedMinutes;
+          setCredit('Anam', String(Number.isInteger(n) ? n : n.toFixed(1)), 'min used this month');
+        } else setCredit('Anam', 'Linked', 'Tap to open Anam Lab');
+      } catch (_) { setCredit('Anam', 'Linked', 'Tap to open Anam Lab'); }
+    })();
     const fal = (async () => {
       if (!state.falKeySet) { setCredit('Fal', '—', 'Add your key', 'warn'); return; }
       try {
@@ -6120,7 +6157,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         if (typeof d.balance === 'number') {
           const sym = (d.currency || 'USD') === 'USD' ? '$' : '';
           setCredit('Fal', `${sym}${d.balance.toFixed(2)}`, sym ? 'credit left' : (d.currency + ' left'));
-        } else if (d.reason === 'needs_admin_key') setCredit('Fal', '—', 'Needs admin key', 'warn');
+        } else if (d.reason === 'needs_admin_key') setCredit('Fal', '—', 'Key needs Admin scope', 'warn');
         else if (d.reason === 'not_set') setCredit('Fal', '—', 'Add your key', 'warn');
         else setCredit('Fal', '—', 'Unavailable', 'warn');
       } catch (_) { setCredit('Fal', '—', 'Unavailable', 'warn'); }
@@ -6142,21 +6179,24 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       } catch (_) { setCredit('Minutes', '—', 'Unavailable', 'warn'); }
       finally { clearTimeout(timer); }
     })();
-    await Promise.all([fal, mins]);
+    await Promise.all([anam, fal, mins]);
     credits.at = Date.now();
     credits.busy = false;
   }
   $('refreshCreditsBtn')?.addEventListener('click', () => refreshCredits(true));
   $('creditAnam')?.addEventListener('click', () => {
-    if (state.anamKeySet) window.open('https://lab.anam.ai', '_blank', 'noopener');
+    if (state.anamKeySet) window.open('https://lab.anam.ai/subscription', '_blank', 'noopener');
     else $('apiKeysScreen').classList.add('active');
   });
   $('creditFal')?.addEventListener('click', () => {
     if (!state.falKeySet) $('apiKeysScreen').classList.add('active');
-    else if ($('creditFalSub').textContent === 'Needs admin key') window.open('https://fal.ai/dashboard/keys', '_blank', 'noopener');
+    else if ($('creditFalSub').textContent === 'Key needs Admin scope') window.open('https://fal.ai/dashboard/keys', '_blank', 'noopener');
     else refreshCredits(true);
   });
   $('creditMinutes')?.addEventListener('click', () => refreshCredits(true));
+  // Buy more minutes: hook for the Minutes page (not built yet).
+  function openMinutesPage(){}
+  $('buyMinutesBtn')?.addEventListener('click', (e) => { e.stopPropagation(); openMinutesPage(); });
 
   // ---- Connect accounts page
   function openAccounts(){ $('accountsScreen').classList.add('active'); fetchConnectedStatus(); }

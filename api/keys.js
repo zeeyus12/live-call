@@ -97,6 +97,40 @@ export default async function handler(req, res) {
     }
   }
 
+  if (req.method === 'GET' && req.query.balance === 'anam') {
+    // Anam has no balance/usage endpoint, so total this key's own session time for the
+    // current (UTC) calendar month. Billing periods may start on another day.
+    const anamKey = await getProviderKey(supabase, userId, 'anam');
+    if (!anamKey) return res.status(200).json({ reason: 'not_set' });
+    try {
+      const monthStart = Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1);
+      let usedMs = 0, sessions = 0, desc = true;
+      for (let page = 1; page <= 30; page++) {
+        const r = await fetch(`https://api.anam.ai/v1/sessions?page=${page}&perPage=100`, {
+          headers: { Authorization: `Bearer ${anamKey}`, Accept: 'application/json' },
+        });
+        if (r.status === 401 || r.status === 403) return res.status(200).json({ reason: 'invalid_key' });
+        if (!r.ok) return res.status(200).json({ reason: 'unavailable', status: r.status });
+        const body = await r.json();
+        const rows = Array.isArray(body?.data) ? body.data : [];
+        const startOf = (s) => Date.parse(s.startTime || s.createdAt || '');
+        if (page === 1 && rows.length > 1) desc = startOf(rows[0]) >= startOf(rows[rows.length - 1]);
+        for (const s of rows) {
+          const start = startOf(s);
+          if (!(start >= monthStart)) continue;
+          sessions++;
+          usedMs += typeof s.sessionLengthMs === 'number' ? s.sessionLengthMs
+            : Math.max(0, (s.endTime ? Date.parse(s.endTime) : Date.now()) - start);
+        }
+        if (!body?.meta?.next || !rows.length) break;
+        if (desc && startOf(rows[rows.length - 1]) < monthStart) break; // newest-first: the rest is older
+      }
+      return res.status(200).json({ usedMinutes: Math.round(usedMs / 6000) / 10, sessions });
+    } catch (err) {
+      return res.status(200).json({ reason: 'unavailable' });
+    }
+  }
+
   if (req.method === 'GET') {
     // Only ever reports whether a key is set, never the key itself - the
     // plaintext key never leaves the vault after the moment it's first saved.
