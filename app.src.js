@@ -626,12 +626,78 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     }
   }
 
+  // Picks the outgoing source for the next social call and keeps the prep tabs in step.
+  function setPrepSource(source){
+    selectedCallSource = source === 'avatar' ? 'avatar' : 'lucy';
+    $('prepSourceLucyBtn')?.classList.toggle('active', selectedCallSource === 'lucy');
+    $('prepSourceAvatarBtn')?.classList.toggle('active', selectedCallSource === 'avatar');
+    const srcLabel = $('prepSourceLabel');
+    if (srcLabel) srcLabel.textContent = selectedCallSource === 'avatar' ? 'AI Avatar (Anam)' : 'Live Swap / Lucy 2.5';
+  }
+
+  // Reads a chat message for "call <who> on <platform>". Only an imperative call verb plus a
+  // platform, a phone number or a saved contact counts, so "I'll call later" never dials.
+  function detectCallIntent(text){
+    const t = String(text || '');
+    if (/\b(?:don'?t|do not|never|no need to|not)\s+(?:to\s+)?(?:call|phone|ring|dial)\b/i.test(t)) return null;
+    if (!/(?:^|[.!?\n]\s*|\b(?:please|pls|can you|could you|go ahead and|and|then|now)\s+)(?:video\s*call|call|phone|ring|dial|facetime)\b/i.test(t)) return null;
+    const lower = t.toLowerCase();
+    let platform = null;
+    if (/whats\s?app|\bwa\b/i.test(t)) platform = 'whatsapp';
+    else if (/telegram|\btg\b/i.test(t)) platform = 'telegram';
+    const contact = loadSavedContacts().slice().sort((a, b) => b.name.length - a.name.length)
+      .find(c => c.name && c.name.trim().length >= 2 && lower.includes(c.name.trim().toLowerCase()));
+    const numMatch = t.match(/\+?\d[\d\s().-]{6,}\d/);
+    const number = numMatch ? numMatch[0].replace(/\D/g, '') : '';
+    const handle = (t.match(/@([A-Za-z0-9_]{4,})/) || [])[1] || '';
+    if (!platform && !contact && !number && !handle) return null;
+    if (!platform) platform = handle ? 'telegram' : 'whatsapp';
+    return { platform, contact, number, handle };
+  }
+
+  // Places the call the message asked for. Returns true when the message was a call request.
+  function handleCallIntent(text){
+    const intent = detectCallIntent(text);
+    if (!intent) return false;
+    const note = (msg) => { chatMessages.push({ role: 'assistant', content: msg }); renderChatThread(); saveChat(); };
+    if (!state.anamAvatarId) { note('Add your avatar first, then I can place the call.'); return true; }
+    state.systemPrompt = chatMessages.filter(m => m.role === 'user').map(m => m.content).join(' ');
+    persist();
+    setPrepSource('avatar');
+    const { platform, contact, number, handle } = intent;
+    const label = platform === 'whatsapp' ? 'WhatsApp' : 'Telegram';
+    currentSocialPlatform = platform;
+    const place = (c) => { selectContactForCall(c); placeSocialCall(); };
+
+    if (platform === 'whatsapp' && (contact || number)) {
+      const c = contact ? { name: contact.name, target: contact.target } : { name: '+' + number, target: number };
+      note(`Calling ${c.name} on WhatsApp…`);
+      place(c);
+    } else if (platform === 'telegram' && (contact || number || handle)) {
+      const query = handle ? '@' + handle : (contact ? contact.target : number);
+      note(`Calling ${contact ? contact.name : query} on Telegram…`);
+      fetch(SOCIAL_CALL_API_BASE + '/api/social-call/telegram/resolve', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }),
+      }).then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.id) { note(data.error || 'Could not find that Telegram user.'); openContactPicker('telegram'); return; }
+        const name = [data.first_name, data.last_name].filter(Boolean).join(' ') || data.username || query;
+        place({ name, target: data.id });
+      }).catch((e) => { note('Telegram lookup failed: ' + (e.message || e)); });
+    } else {
+      note(`Who should I call on ${label}? Pick a contact.`);
+      openContactPicker(platform);
+    }
+    return true;
+  }
+
   async function sendChatMessage(){
     const text = $('briefInput').value.trim();
     if (!text) return;
     $('briefInput').value = ''; autoGrow();
     chatMessages.push({ role: 'user', content: text });
     renderChatThread();
+    if (handleCallIntent(text)) return;
 
     chatMessages.push({ role: 'assistant', content: '…' });
     const thinkingIdx = chatMessages.length - 1;
@@ -668,6 +734,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     renderChatThread();
   }
   $('newChatBtn')?.addEventListener('click', () => { startNewChat(); showTab('chat'); });
+  $('chatNewBtn')?.addEventListener('click', () => { startNewChat(); });
 
 
   async function loadAnamAvatars(){
@@ -4620,10 +4687,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // -------------------------------------------------------------
   // Call Flow: Home -> Choose how to call
   // -------------------------------------------------------------
-  $('headerCallBtn')?.addEventListener('click', () => {
+  function openCallChoice(){
     $('callChoiceModal').classList.add('active');
     fetchConnectedStatus();
-  });
+  }
+  $('headerCallBtn')?.addEventListener('click', openCallChoice);
+  $('chatCallBtn')?.addEventListener('click', openCallChoice);
+  // Live Swap page: calls from here go out with the Live Swap (Lucy) source.
+  $('swapCallBtn')?.addEventListener('click', () => { setPrepSource('lucy'); openCallChoice(); });
   $('closeCallChoiceBtn')?.addEventListener('click', () => {
     $('callChoiceModal').classList.remove('active');
   });
