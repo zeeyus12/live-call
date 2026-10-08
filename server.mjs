@@ -369,7 +369,7 @@ function startTelegramBridge() {
   console.log('[Server] Launching Telegram Bridge daemon...');
   const startedAt = Date.now();
   tgProcess = spawn('python3', [scriptPath], {
-    env: { ...process.env, TG_PORT: String(TG_PORT) },
+    env: { ...process.env, TG_PORT: String(TG_PORT), PYTHONPATH: [path.join(__dirname, 'pylibs'), process.env.PYTHONPATH].filter(Boolean).join(path.delimiter) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 

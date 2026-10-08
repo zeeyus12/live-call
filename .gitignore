@@ -17,3 +17,5 @@ server/voicechanger/*.onnx
 server/voicechanger/*.index
 
 
+
+pylibs/
