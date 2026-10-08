@@ -170,6 +170,15 @@
     background:linear-gradient(135deg, var(--accent) 0%, rgba(var(--accent-rgb),0.62) 100%);
     box-shadow:0 6px 18px rgba(var(--accent-rgb),0.45), inset 0 1px 0 rgba(255,255,255,0.28);
   }
+  #tabBar .tabBtn.active{background:transparent; box-shadow:none;}
+  #tabGlider{
+    position:absolute; top:7px; left:0; width:50px; height:50px; border-radius:999px; z-index:0; pointer-events:none;
+    background:linear-gradient(135deg, var(--accent) 0%, rgba(var(--accent-rgb),0.62) 100%);
+    box-shadow:0 6px 18px rgba(var(--accent-rgb),0.45), inset 0 1px 0 rgba(255,255,255,0.28);
+    transition:left 0.4s cubic-bezier(.3,1.35,.5,1), width 0.4s cubic-bezier(.3,1.35,.5,1);
+  }
+  #tabGlider.moving{animation:liquidSquish 0.5s ease;}
+  @keyframes liquidSquish{0%{transform:scale(1,1);} 35%{transform:scale(1,0.84);} 70%{transform:scale(1,1.06);} 100%{transform:scale(1,1);}}
   .tabBtn svg{width:21px; height:21px;}
   .tabAvatarRing{
     width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center;
@@ -930,5 +939,5 @@
   .tileBadge.danger{background:rgba(190,40,60,0.78);}
   .tileName{text-align:center; font-size:14px; font-weight:600; letter-spacing:-0.005em;}
 
-  #screenHome{padding-bottom:200px;} /* clears the brief input bar + floating nav */
+  #screenHome, #screenChat{padding-bottom:200px;} /* clears the brief input bar + floating nav */
   #accountsScreen .hint, #homeOpenAccounts .hint, #profileOpenAccounts .hint{text-align:left;}

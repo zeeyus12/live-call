@@ -193,8 +193,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   })();
 
 
-  const screens = { home: $('screenHome'), recent: $('screenRecent'), contacts: $('screenContacts'), profile: $('screenProfile'), features: $('screenFeatures') };
+  const screens = { home: $('screenHome'), chat: $('screenChat'), recent: $('screenRecent'), contacts: $('screenContacts'), profile: $('screenProfile'), features: $('screenFeatures') };
   const tabBtns = document.querySelectorAll('.tabBtn');
+  let gliderLeft = null;
   function moveTabGlider(name){
     const glider = $('tabGlider');
     const btn = document.querySelector(`#tabBar .tabBtn[data-tab="${name}"]`);
@@ -202,7 +203,25 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     const barRect = $('tabBar').getBoundingClientRect();
     const btnRect = btn.getBoundingClientRect();
     if (btnRect.width === 0) return; // tab bar hidden (desktop mode) - nothing to move
-    glider.style.transform = `translateX(${btnRect.left - barRect.left - 6}px)`;
+    const left = btnRect.left - barRect.left - 1, w = btnRect.width;
+    if (gliderLeft === null || left === gliderLeft) {
+      glider.style.transition = 'none';
+      glider.style.left = left + 'px'; glider.style.width = w + 'px';
+      void glider.offsetWidth;
+      glider.style.transition = '';
+      gliderLeft = left;
+      return;
+    }
+    // liquid: stretch across both tabs first, then the tail catches up and settles
+    const from = gliderLeft;
+    glider.style.left = Math.min(from, left) + 'px';
+    glider.style.width = (Math.abs(left - from) + w) + 'px';
+    glider.classList.remove('moving'); void glider.offsetWidth; glider.classList.add('moving');
+    clearTimeout(glider._t);
+    glider._t = setTimeout(() => {
+      glider.style.left = left + 'px'; glider.style.width = w + 'px';
+    }, 150);
+    gliderLeft = left;
   }
   function showTab(name){
     const nextEl = screens[name];
@@ -215,9 +234,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       nextEl.classList.add('active');
       requestAnimationFrame(() => nextEl.classList.remove('fadeIn'));
     }
-    tabBtns.forEach(b => b.classList.toggle('active', b.dataset.tab === name));
-    moveTabGlider(name);
-    $('homeInputBar').classList.toggle('visible', name === 'home');
+    const navName = name === 'contacts' ? 'profile' : name; // Contacts lives under Profile now
+    tabBtns.forEach(b => b.classList.toggle('active', b.dataset.tab === navName));
+    moveTabGlider(navName);
+    $('homeInputBar').classList.toggle('visible', name === 'chat');
+    if (name === 'chat') renderChatThread();
     if (name === 'recent') renderRecent();
     if (name === 'contacts') renderContactsTab();
     if (name === 'profile') { renderProfile(); fetchConnectedStatus(); }
@@ -225,7 +246,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     if (name === 'home') refreshHome();
   }
   tabBtns.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
-  window.addEventListener('resize', () => moveTabGlider(document.querySelector('#tabBar .tabBtn.active')?.dataset.tab || 'home'));
+  window.addEventListener('resize', () => { gliderLeft = null; moveTabGlider(document.querySelector('#tabBar .tabBtn.active')?.dataset.tab || 'home'); });
+  $('profileOpenContacts')?.addEventListener('click', () => showTab('contacts'));
+  $('closeContactsBtn')?.addEventListener('click', () => showTab('profile'));
   setTimeout(() => moveTabGlider('home'), 50);
 
   $('openApiKeys')?.addEventListener('click', () => $('apiKeysScreen').classList.add('active'));
@@ -435,7 +458,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   }
   function applyChatBg(){
     const effectiveUrl = state.chatBgUrl === '__none__' ? '' : (state.chatBgUrl || adminDefaultChatBg);
-    ['screenHome', 'screenFeatures'].forEach(id => {
+    ['screenChat', 'screenFeatures'].forEach(id => {
       const el = $(id);
       if (!el) return;
       if (effectiveUrl) {
@@ -644,7 +667,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     $('homeHint').textContent = '';
     renderChatThread();
   }
-  $('newChatBtn')?.addEventListener('click', startNewChat);
+  $('newChatBtn')?.addEventListener('click', () => { startNewChat(); showTab('chat'); });
 
 
   async function loadAnamAvatars(){
@@ -1100,7 +1123,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     chatMessages = Array.isArray(chat.messages) ? chat.messages : [];
     state.systemPrompt = chatMessages.filter(m => m.role === 'user').map(m => m.content).join(' ');
     persist();
-    showTab('home');
+    showTab('chat');
     renderChatThread();
   }
 
