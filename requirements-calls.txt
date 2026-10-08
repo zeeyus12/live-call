@@ -1,0 +1,3 @@
+# Optional: Telegram call support. Kept separate because it needs a tgcalls wheel that some hosts lack,
+# and a failure here must not block the core bridge (login/contacts) from installing.
+pytgcalls>=2.1

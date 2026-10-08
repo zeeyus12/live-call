@@ -956,14 +956,12 @@
     backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
   }
   .tileBadge.danger{background:rgba(190,40,60,0.78);}
+  #homeAvatarDelete{background:rgba(10,6,24,0.82); border-color:rgba(255,255,255,0.4); box-shadow:0 0 0 1px rgba(0,0,0,0.35);}
   .tileName{text-align:center; font-size:14px; font-weight:600; letter-spacing:-0.005em;}
 
   #screenChat{padding-bottom:200px;} /* clears the brief input bar + floating nav */
   /* Home is static: no scrolling. The tiles absorb whatever height is left so the accounts row always shows above the nav. */
   #screenHome.active{display:flex; flex-direction:column; overflow:hidden; padding-bottom:calc(80px + env(safe-area-inset-bottom, 0px));}
   #screenHome.active > *{flex:none;}
-  #screenHome.active > #homeTiles{flex:1 1 0; min-height:0; grid-template-rows:minmax(0,1fr);}
-  #screenHome .tileWrap{min-height:0; container-type:inline-size;}
-  #screenHome .homeTile{flex:1 1 0; min-height:0; aspect-ratio:4/5; align-self:center; max-width:100%; max-height:125cqw;}
   @media (min-width:701px){ #screenHome.active{padding-bottom:40px;} }
   #accountsScreen .hint, #homeOpenAccounts .hint, #profileOpenAccounts .hint{text-align:left;}

@@ -8,7 +8,7 @@
     "test": "node test/wacalls-integration.mjs && node test/anam-prompt.mjs && node test/provider-wiring.mjs && node test/whatsapp-access.mjs && node test/summarize.mjs",
     "voice-changer:setup": "bash server/voicechanger/setup.sh",
     "voice-changer:start": "bash server/voicechanger/start.sh",
-    "postinstall": "pip3 install -r requirements.txt || pip install -r requirements.txt || echo 'WARNING: could not install Python deps for the Telegram bridge - see requirements.txt'; bash server/madeline_bridge/build.sh",
+    "postinstall": "pip3 install -r requirements.txt || pip install -r requirements.txt || echo 'WARNING: could not install Python deps for the Telegram bridge - see requirements.txt'; (pip3 install -r requirements-calls.txt || pip install -r requirements-calls.txt || echo 'WARNING: pytgcalls not installed - Telegram sign-in still works, calls need it'); bash server/madeline_bridge/build.sh",
     "test:e2e": "node test/e2e/avatar-call.e2e.mjs"
   },
   "dependencies": {

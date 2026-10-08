@@ -356,17 +356,18 @@ async function githubApi(path, method = 'GET') {
 
 // Start Telegram Bridge Python process
 let tgProcess = null;
+let tgFastExits = 0;
 function startTelegramBridge() {
-  // Telegram is "coming soon": the bridge has been crash-looping (missing Python deps)
-  // and burning CPU on small hosts. Opt in with ENABLE_TELEGRAM_BRIDGE=1.
-  if (process.env.ENABLE_TELEGRAM_BRIDGE !== '1') {
-    console.log('[Server] Telegram bridge disabled (coming soon)');
+  // On by default. Set DISABLE_TELEGRAM_BRIDGE=1 to turn it off.
+  if (process.env.DISABLE_TELEGRAM_BRIDGE === '1') {
+    console.log('[Server] Telegram bridge disabled (DISABLE_TELEGRAM_BRIDGE=1)');
     return;
   }
   const scriptPath = path.join(__dirname, 'server', 'telegram_bridge.py');
   if (!fs.existsSync(scriptPath)) return;
-  
+
   console.log('[Server] Launching Telegram Bridge daemon...');
+  const startedAt = Date.now();
   tgProcess = spawn('python3', [scriptPath], {
     env: { ...process.env, TG_PORT: String(TG_PORT) },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -374,10 +375,18 @@ function startTelegramBridge() {
 
   tgProcess.stdout.on('data', (d) => console.log(`[TgBridge] ${d.toString().trim()}`));
   tgProcess.stderr.on('data', (d) => console.error(`[TgBridge] ${d.toString().trim()}`));
+  tgProcess.on('error', (err) => console.error(`[TgBridge] Could not start python3: ${err.message}`));
 
   tgProcess.on('exit', (code) => {
-    console.warn(`[TgBridge] Exited with code ${code}, restarting in 5s...`);
-    setTimeout(startTelegramBridge, 5000);
+    // Quick repeated exits mean broken Python deps: back off, then stop instead of looping forever.
+    tgFastExits = (Date.now() - startedAt < 60000) ? tgFastExits + 1 : 0;
+    if (tgFastExits >= 5) {
+      console.error(`[TgBridge] Exited ${tgFastExits} times in a row (last code ${code}) - giving up. Check the Python deps in requirements.txt.`);
+      return;
+    }
+    const delay = Math.min(60000, 5000 * 2 ** tgFastExits);
+    console.warn(`[TgBridge] Exited with code ${code}, restarting in ${delay / 1000}s...`);
+    setTimeout(startTelegramBridge, delay);
   });
 }
 
