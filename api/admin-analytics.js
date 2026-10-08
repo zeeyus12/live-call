@@ -66,10 +66,32 @@ export default async function handler(req, res) {
     };
   }).sort((a, b) => b.total - a.total);
 
+  // Revenue comes from the payments table (sql/012). Until it exists the panel
+  // says so instead of failing. Only the most recent currency is summed.
+  const revenue = { currency: 'USD', total: 0, count: 0, payers: 0, allTime: 0, allTimeCount: 0, series: [], recent: [], tableMissing: false };
+  const payRes = await supabase.from('payments').select('user_id, amount, currency, provider, paid_at').eq('status', 'paid').order('paid_at', { ascending: false }).limit(5000);
+  if (payRes.error) revenue.tableMissing = true;
+  else {
+    const all = payRes.data || [];
+    revenue.currency = all[0]?.currency || 'USD';
+    const paid = all.filter(p => p.currency === revenue.currency);
+    const ranged = paid.filter(p => inRange(p.paid_at));
+    const byDay = new Map([...series.keys()].map(d => [d, 0]));
+    for (const p of ranged) { const d = String(p.paid_at).slice(0, 10); if (byDay.has(d)) byDay.set(d, byDay.get(d) + Number(p.amount)); }
+    const emailOf = Object.fromEntries((usersRes.data || []).map(u => [u.user_id, u.email]));
+    Object.assign(revenue, {
+      total: ranged.reduce((a, p) => a + Number(p.amount), 0), count: ranged.length,
+      payers: new Set(ranged.map(p => p.user_id)).size,
+      allTime: paid.reduce((a, p) => a + Number(p.amount), 0), allTimeCount: paid.length,
+      series: [...byDay].map(([d, revenue]) => ({ d, revenue })),
+      recent: paid.slice(0, 20).map(p => ({ email: emailOf[p.user_id] || null, amount: Number(p.amount), provider: p.provider, paid_at: p.paid_at })),
+    });
+  }
+
   const totals = {
     calls: rows.reduce((a, r) => a + r.calls, 0),
     chats: rows.reduce((a, r) => a + r.chats, 0),
     activeUsers: rows.filter(r => r.total > 0).length,
   };
-  return res.status(200).json({ users: rows, totals, series: [...series].map(([d, calls]) => ({ d, calls })), days: days || 'all' });
+  return res.status(200).json({ users: rows, totals, revenue, series: [...series].map(([d, calls]) => ({ d, calls })), days: days || 'all' });
 }

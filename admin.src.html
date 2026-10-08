@@ -132,6 +132,7 @@
   <div class="aChips" id="aChips"><button data-d="7">7 days</button><button data-d="30" class="on">30 days</button><button data-d="90">90 days</button></div>
   <div id="aBody">
     <div class="tabPanel active" id="tab-overview"></div>
+    <div class="tabPanel" id="tab-revenue"></div>
     <div class="tabPanel" id="tab-users">
       <div id="rows"></div>
     </div>
@@ -175,7 +176,7 @@
   <div id="aScrim"></div>
   <nav id="aDrawer">
     <div class="brand"><img src="icon-192.png" alt="">Live Call Admin</div>
-    <button class="nav active" data-tab="overview">Overview</button><button class="nav" data-tab="users">Users</button>
+    <button class="nav active" data-tab="overview">Overview</button><button class="nav" data-tab="revenue">Revenue</button><button class="nav" data-tab="users">Users</button>
     <button class="nav" data-tab="analytics">Analytics</button><button class="nav" data-tab="bg">Backgrounds</button><button class="nav" data-tab="push">Push</button>
   </nav>
 </div>
@@ -246,8 +247,8 @@
   });
 
   // ---- Side panel ----
-  const TABS = ['overview', 'users', 'analytics', 'bg', 'push'];
-  const TITLES = { overview: 'Overview', users: 'Users', analytics: 'Analytics', bg: 'Backgrounds', push: 'Push' };
+  const TABS = ['overview', 'revenue', 'users', 'analytics', 'bg', 'push'];
+  const TITLES = { overview: 'Overview', revenue: 'Revenue', users: 'Users', analytics: 'Analytics', bg: 'Backgrounds', push: 'Push' };
   let range = 30, current = 'overview';
   const fitHeight = () => { if (window.navigator.standalone) document.body.style.height = Math.max(window.innerHeight, window.screen.height || 0) + 'px'; };
   fitHeight(); window.addEventListener('resize', fitHeight);
@@ -264,9 +265,10 @@
     TABS.forEach(t => $('tab-' + t).classList.toggle('active', t === name));
     document.querySelectorAll('#aDrawer .nav').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
     $('aTitle').textContent = TITLES[name];
-    $('aChips').style.display = name === 'overview' || name === 'analytics' ? '' : 'none';
+    $('aChips').style.display = ['overview', 'revenue', 'analytics'].includes(name) ? '' : 'none';
     $('aBody').scrollTop = 0;
     if (name === 'overview') loadOverview();
+    if (name === 'revenue') loadRevenue();
     if (name === 'analytics') loadAnalytics();
     if (name === 'users') loadUsers();
   }
@@ -281,6 +283,28 @@
   }));
 
   const card = (l, v, sub, go) => `<div class="aCard"${go ? ` data-go="${go}"` : ''}><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`;
+  const money = (r) => { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: r.currency, maximumFractionDigits: 2 }).format(r.total || 0); } catch (e) { return (r.currency || '') + ' ' + (r.total || 0).toFixed(2); } };
+  async function loadRevenue(){
+    const el = $('tab-revenue');
+    el.innerHTML = '<p class="emptyState">Loading…</p>';
+    try {
+      const a = await adminFetch('/api/admin-analytics?days=' + range);
+      const r = a.revenue;
+      const fmt = (n) => money({ currency: r.currency, total: n });
+      if (r.tableMissing) { el.innerHTML = '<p class="emptyState">Run sql/012_payments.sql in Supabase to turn on revenue tracking.</p>'; return; }
+      const max = Math.max(...r.series.map(x => x.revenue), 1);
+      el.innerHTML = `<div class="aGrid">
+        ${card('Revenue', fmt(r.total), `last ${range} days`)}
+        ${card('All time', fmt(r.allTime), `${r.allTimeCount} payment${r.allTimeCount === 1 ? '' : 's'}`)}
+        ${card('Payments', r.count, `last ${range} days`)}
+        ${card('Paying users', r.payers, r.payers ? `${fmt(r.total / r.payers)} each` : 'none yet')}
+        <div class="aCard wide"><div class="l">Daily revenue</div><div class="aBars">${r.series.map(x => `<i title="${x.d}: ${fmt(x.revenue)}" style="height:${Math.max(2, (x.revenue / max) * 100)}%"></i>`).join('')}</div></div>
+      </div>
+      <h1 style="margin:18px 0 10px;">Recent payments</h1>
+      ${r.recent.length ? r.recent.map(p => `<div class="statRow"><div style="flex:1; min-width:0;"><div class="email">${String(p.email || 'Unknown user').replace(/</g, '&lt;')}</div><div class="sub">${new Date(p.paid_at).toLocaleString()}${p.provider ? ' · ' + String(p.provider).replace(/</g, '&lt;') : ''}</div></div><div class="total">${fmt(p.amount)}</div></div>`).join('') : '<p class="emptyState">No payments yet. They will show here as soon as your payment provider is connected.</p>'}`;
+    } catch (err) { el.innerHTML = `<p class="emptyState">${String(err.message).replace(/</g, '&lt;')}</p>`; }
+  }
+
   async function loadOverview(){
     const el = $('tab-overview');
     el.innerHTML = '<p class="emptyState">Loading…</p>';
@@ -292,12 +316,13 @@
       const pro = u.users.filter(x => x.whatsapp && x.whatsapp.plan === 'pro').length;
       const max = Math.max(...a.series.map(x => x.calls), 1);
       el.innerHTML = `<div class="aGrid">
+        ${card('Revenue', money(a.revenue), a.revenue.tableMissing ? 'set up payments' : `${a.revenue.count} payment${a.revenue.count === 1 ? '' : 's'}`, 'revenue')}
+        ${card('Paying users', a.revenue.payers, `of ${u.users.length}`, 'revenue')}
         ${card('Users', u.users.length, `${approved} approved`, 'users')}
         ${card('Pending', pending, pending ? 'tap to review' : 'all approved', 'users')}
         ${card('Calls', a.totals.calls, `last ${range} days`, 'analytics')}
         ${card('Chats', a.totals.chats, `last ${range} days`, 'analytics')}
         ${card('Active users', a.totals.activeUsers, `of ${u.users.length}`, 'analytics')}
-        ${card('WhatsApp open', waOpen, `${pro} pro`, 'users')}
         <div class="aCard wide"><div class="l">Daily calls</div><div class="aBars">${a.series.map(x => `<i title="${x.d}: ${x.calls}" style="height:${Math.max(2, (x.calls / max) * 100)}%"></i>`).join('')}</div></div>
       </div>`;
       el.querySelectorAll('[data-go]').forEach(c => c.addEventListener('click', () => showTab(c.dataset.go)));
@@ -413,10 +438,10 @@
     try {
       const { dataUrl, ext } = await downscaleImage(pickedFile);
       const { data: { session } } = await supabase.auth.getSession();
-      const r = await fetch('/api/admin-upload-login-bg', {
+      const r = await fetch('/api/admin-upload-bg', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ imageBase64: dataUrl, fileExt: ext }),
+        body: JSON.stringify({ target: 'login', imageBase64: dataUrl, fileExt: ext }),
       });
       const data = await safeJson(r);
       if (!r.ok) { $('loginBgHint').textContent = data.error; return; }
@@ -431,10 +456,10 @@
   $('loginBgClearBtn').addEventListener('click', async () => {
     $('loginBgHint').textContent = 'Removing…';
     const { data: { session } } = await supabase.auth.getSession();
-    const r = await fetch('/api/admin-upload-login-bg', {
+    const r = await fetch('/api/admin-upload-bg', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ action: 'clear' }),
+      body: JSON.stringify({ target: 'login', action: 'clear' }),
     });
     const data = await r.json();
     if (!r.ok) { $('loginBgHint').textContent = data.error; return; }
@@ -462,10 +487,10 @@
         try {
           const { data: { session } } = await supabase.auth.getSession();
           const isActive = btn.classList.contains('active');
-          const r = await fetch('/api/admin-upload-chat-bg', {
+          const r = await fetch('/api/admin-upload-bg', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-            body: JSON.stringify(isActive ? { action: 'clearDefault' } : { action: 'setDefault', url: btn.dataset.url }),
+            body: JSON.stringify({ target: 'chat', ...(isActive ? { action: 'clearDefault' } : { action: 'setDefault', url: btn.dataset.url }) }),
           });
           const data = await r.json();
           if (!r.ok) { $('chatBgHint').textContent = data.error; btn.disabled = false; return; }
@@ -481,10 +506,10 @@
         btn.disabled = true;
         try {
           const { data: { session } } = await supabase.auth.getSession();
-          const r = await fetch('/api/admin-upload-chat-bg', {
+          const r = await fetch('/api/admin-upload-bg', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-            body: JSON.stringify({ action: 'delete', id: btn.dataset.id }),
+            body: JSON.stringify({ target: 'chat', action: 'delete', id: btn.dataset.id }),
           });
           const data = await r.json();
           if (!r.ok) { $('chatBgHint').textContent = data.error; btn.disabled = false; return; }
@@ -506,10 +531,10 @@
       try {
         const { dataUrl, ext } = await downscaleImage(file);
         const { data: { session } } = await supabase.auth.getSession();
-        const r = await fetch('/api/admin-upload-chat-bg', {
+        const r = await fetch('/api/admin-upload-bg', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-          body: JSON.stringify({ imageBase64: dataUrl, fileExt: ext }),
+          body: JSON.stringify({ target: 'chat', imageBase64: dataUrl, fileExt: ext }),
         });
         const data = await safeJson(r);
         $('chatBgFile').value = '';
@@ -534,10 +559,10 @@
       btn.addEventListener('click', async () => {
         btn.disabled = true;
         const { data: { session } } = await supabase.auth.getSession();
-        const r = await fetch('/api/admin-upload-splash-bg', {
+        const r = await fetch('/api/admin-upload-bg', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-          body: JSON.stringify({ action: 'delete', id: btn.dataset.id }),
+          body: JSON.stringify({ target: 'splash', action: 'delete', id: btn.dataset.id }),
         });
         const data = await r.json();
         if (!r.ok) { $('splashBgHint').textContent = data.error; btn.disabled = false; return; }
@@ -555,10 +580,10 @@
       try {
         const { dataUrl, ext } = await downscaleImage(file);
         const { data: { session } } = await supabase.auth.getSession();
-        const r = await fetch('/api/admin-upload-splash-bg', {
+        const r = await fetch('/api/admin-upload-bg', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
-          body: JSON.stringify({ imageBase64: dataUrl, fileExt: ext }),
+          body: JSON.stringify({ target: 'splash', imageBase64: dataUrl, fileExt: ext }),
         });
         const data = await safeJson(r);
         $('splashBgFile').value = '';
