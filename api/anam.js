@@ -52,6 +52,7 @@ export default async function handler(req, res) {
         id: a.id,
         name: a.displayName || a.name || a.id,
         preview_url: a.videoUrl || a.previewUrl || a.audioUrl || '',
+        image_url: a.imageUrl || '',
       }));
       return res.status(200).json({ [resource]: items });
     } catch (err) {
@@ -150,7 +151,7 @@ export default async function handler(req, res) {
           return res.status(502).json({ error: `Anam returned a non-JSON response (status ${r.status}). Raw: ${raw.slice(0, 200)}` });
         }
         if (!r.ok) return res.status(r.status).json({ error: data });
-        return res.status(200).json({ id: data.id, name: data.displayName || data.name || data.id });
+        return res.status(200).json({ id: data.id, name: data.displayName || data.name || data.id, imageUrl: data.imageUrl || '' });
       } catch (err) {
         return res.status(500).json({ error: String(err) });
       }

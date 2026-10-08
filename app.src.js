@@ -222,6 +222,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     if (name === 'contacts') renderContactsTab();
     if (name === 'profile') { renderProfile(); fetchConnectedStatus(); }
     if (name === 'features') updateLfKeyHint();
+    if (name === 'home') refreshHome();
   }
   tabBtns.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
   window.addEventListener('resize', () => moveTabGlider(document.querySelector('#tabBar .tabBtn.active')?.dataset.tab || 'home'));
@@ -654,6 +655,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const data = await r.json();
       if (!r.ok) { sel.innerHTML = `<option value="">Error: ${JSON.stringify(data.error).slice(0,120)}</option>`; return; }
       const avatars = data.avatars || [];
+      anamAvatarList = avatars;
+      refreshHomeTiles();
       const options = avatars.map(a => `<option value="${a.id}">${a.name}</option>`);
       if (state.anamAvatarId && !avatars.some(a => a.id === state.anamAvatarId)) {
         options.unshift(`<option value="${state.anamAvatarId}">${state.anamAvatarName || state.anamAvatarId}</option>`);
@@ -710,6 +713,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     if (state.anamVoiceName) parts.push(state.anamVoiceName);
     $('anamAvatarSummary').textContent = parts.join(' · ') || 'Not set';
     $('avatarPhotoTips').style.display = state.anamAvatarId ? 'none' : 'flex';
+    refreshHomeTiles();
   }
   $('openAnamAvatarScreen')?.addEventListener('click', () => {
     $('anamAvatarScreen').classList.add('active');
@@ -798,6 +802,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
       state.anamAvatarId = data.id;
       state.anamAvatarName = data.name;
+      anamAvatarList = anamAvatarList.filter(a => a.id !== data.id).concat([{ id: data.id, name: data.name, image_url: data.imageUrl || '' }]);
+      try { localStorage.setItem(avPhotoKey(), JSON.stringify({ id: data.id, url: pub.publicUrl })); } catch(_){}
       await persist();
       statusEl.textContent = 'Saved — ' + data.name;
       loadAnamAvatars();
@@ -935,6 +941,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       $('profilePhotoDefault').style.display = 'block';
     }
     updateTabBarAvatar();
+    refreshHomeHeader();
   }
 
   $('profilePhotoBtn')?.addEventListener('click', () => $('profilePhotoInput').click());
@@ -1436,6 +1443,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     }
     try {
       statusEl.textContent = 'Uploading…';
+      const thumbP = makeThumb(file);
       const ext = file.type.split('/')[1];
       const path = `${currentUser.id}/live-filter/${Date.now()}.${ext}`;
       const { error: upErr } = await supabase.storage.from('user-uploads').upload(path, file, { contentType: file.type, upsert: true });
@@ -1443,6 +1451,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const { data: pub } = supabase.storage.from('user-uploads').getPublicUrl(path);
       lfReferenceImageUrl = pub.publicUrl;
       lfReferenceDescription = '';
+      lfReferencePath = path;
+      lfRefThumb = await thumbP;
+      saveLfRef();
+      refreshHomeTiles();
       for (const el of [$('lfImagePreview'), previewEl]) { if (el) { el.src = lfReferenceImageUrl; el.style.display = 'block'; } }
       for (const el of [$('lfImageStatus'), statusEl]) { if (el && el !== statusEl) el.textContent = 'Reference photo ready'; }
 
@@ -1465,6 +1477,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         const dd = await dr.json();
         if (dr.ok && dd.description) {
           lfReferenceDescription = dd.description;
+          saveLfRef();
           statusEl.textContent = 'Reference photo ready';
           lfDebug('Reference described: ' + dd.description);
         } else {
@@ -5892,11 +5905,250 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     $('pendingBox').style.display = 'none';
     authScreen.classList.add('hidden');
     await loadSettings();
+    restoreLfReference();
+    refreshHome(true);
     fetchConnectedStatus();
     loadAnamAvatars();
     loadAnamVoices();
     syncSavedContacts();
     splashAuthDone = true; maybeHideSplash();
+  }
+
+  // -------------------------------------------------------------
+  // Home: credits, Avatar + Live Swap tiles, Connect accounts
+  // -------------------------------------------------------------
+  const avPhotoKey = () => `lc_avatar_photo:${currentUser?.id || 'anon'}`;
+  const lfRefKey = () => `lc_lf_ref:${currentUser?.id || 'anon'}`;
+  let anamAvatarList = [], lfRefThumb = '', lfReferencePath = '';
+
+  function refreshHomeHeader(){
+    const name = (state.displayName || '').trim();
+    const first = name.split(/\s+/)[0] || '';
+    const hello = $('homeHello');
+    if (hello) hello.textContent = first ? `Hello, ${first}` : 'Hello';
+    const img = $('homeProfileImg'), ini = $('homeProfileInitial');
+    if (!img || !ini) return;
+    ini.textContent = (first || currentUser?.email || '?').charAt(0).toUpperCase();
+    if (state.avatarUrl) { img.src = state.avatarUrl; img.style.display = 'block'; }
+    else { img.style.display = 'none'; }
+  }
+
+  // ---- Avatar tile: the Anam avatar (Anam's own render when it has one, else the photo that was uploaded)
+  function localAvatarPhoto(){
+    try {
+      const v = JSON.parse(localStorage.getItem(avPhotoKey()) || 'null');
+      if (v && v.id === state.anamAvatarId) return v.url || '';
+    } catch(_){}
+    return '';
+  }
+  function anamAvatarImage(){
+    if (!state.anamAvatarId) return '';
+    const hit = anamAvatarList.find(a => a.id === state.anamAvatarId);
+    return (hit && hit.image_url) || localAvatarPhoto();
+  }
+  function setTileImage(img, src, fallbackSrc){
+    if (!src) { img.removeAttribute('src'); img.style.display = 'none'; return false; }
+    img.onerror = () => {
+      if (fallbackSrc && img.src !== fallbackSrc) { img.src = fallbackSrc; return; }
+      img.style.display = 'none';
+    };
+    if (img.getAttribute('src') !== src) img.src = src;
+    img.style.display = 'block';
+    return true;
+  }
+  function refreshHomeTiles(){
+    const avImg = $('homeAvatarImg');
+    if (!avImg) return;
+    const src = anamAvatarImage();
+    const has = setTileImage(avImg, src, localAvatarPhoto());
+    $('homeAvatarEmpty').style.display = has ? 'none' : 'flex';
+    $('homeAvatarEmpty').querySelector('span').textContent = state.anamAvatarId ? (state.anamAvatarName || 'Avatar ready') : 'Add photo';
+    $('homeAvatarUpload').style.display = state.anamAvatarId ? 'flex' : 'none';
+    const bg = $('homeHeroBg');
+    if (bg) { bg.style.backgroundImage = has ? `url("${src}")` : ''; bg.classList.toggle('on', has); }
+
+    const swImg = $('homeSwapImg');
+    const swSrc = lfRefThumb || lfReferenceImageUrl;
+    const swHas = setTileImage(swImg, swSrc, lfReferenceImageUrl);
+    $('homeSwapEmpty').style.display = swHas ? 'none' : 'flex';
+    $('homeSwapDelete').style.display = lfReferenceImageUrl ? 'flex' : 'none';
+  }
+
+  // Mirrors an existing upload's status line onto a tile caption.
+  function mirrorStatus(srcId, busyId, ignore){
+    const src = $(srcId), dst = $(busyId);
+    if (!src || !dst) return;
+    let t = null;
+    new MutationObserver(() => {
+      const txt = (src.textContent || '').trim();
+      clearTimeout(t);
+      if (!txt || (ignore && ignore.test(txt))) { dst.style.display = 'none'; return; }
+      dst.textContent = txt.split(' (')[0]; // keep tile captions short
+      dst.style.display = 'block';
+      if (!/…$/.test(txt)) t = setTimeout(() => { dst.style.display = 'none'; }, 4000);
+    }).observe(src, { childList: true, characterData: true, subtree: true });
+  }
+  mirrorStatus('avatarUploadStatus', 'homeAvatarBusy');
+  mirrorStatus('lfImageStatus', 'homeSwapBusy', /^(Reference photo ready|Add a photo)/);
+  function tileNote(busyId, text){
+    const el = $(busyId);
+    el.textContent = text; el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 4000);
+  }
+
+  const onTile = (el, fn) => {
+    el?.addEventListener('click', fn);
+    el?.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === el) { e.preventDefault(); fn(e); } });
+  };
+  function pickAvatarPhoto(){
+    if (!state.anamKeySet) { tileNote('homeAvatarBusy', 'Add your Anam API key in Profile → API first.'); return; }
+    $('avatarPhotoInput').click();
+  }
+  onTile($('homeAvatarTile'), () => {
+    if (state.anamAvatarId) $('openAnamAvatarScreen').click();
+    else pickAvatarPhoto();
+  });
+  $('homeAvatarUpload')?.addEventListener('click', (e) => { e.stopPropagation(); pickAvatarPhoto(); });
+
+  // ---- Live Swap tile: reference photo kept on this device until the person removes it
+  function makeThumb(file, max = 480){
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const k = Math.min(1, max / Math.max(img.width, img.height));
+          const c = document.createElement('canvas');
+          c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          resolve(c.toDataURL('image/jpeg', 0.82));
+        } catch (_) { resolve(''); }
+        URL.revokeObjectURL(url);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(''); };
+      img.src = url;
+    });
+  }
+  function saveLfRef(){
+    try {
+      localStorage.setItem(lfRefKey(), JSON.stringify({ url: lfReferenceImageUrl, desc: lfReferenceDescription, thumb: lfRefThumb, path: lfReferencePath }));
+    } catch (_) {
+      // quota: keep the URL, drop the thumbnail
+      try { localStorage.setItem(lfRefKey(), JSON.stringify({ url: lfReferenceImageUrl, desc: lfReferenceDescription, thumb: '', path: lfReferencePath })); } catch (__) {}
+    }
+  }
+  function restoreLfReference(){
+    let v = null;
+    try { v = JSON.parse(localStorage.getItem(lfRefKey()) || 'null'); } catch (_) {}
+    if (!v || !v.url) { refreshHomeTiles(); return; }
+    lfReferenceImageUrl = v.url;
+    lfReferenceDescription = v.desc || '';
+    lfRefThumb = v.thumb || '';
+    lfReferencePath = v.path || '';
+    const prev = $('lfImagePreview');
+    if (prev) { prev.src = lfRefThumb || lfReferenceImageUrl; prev.style.display = 'block'; }
+    const st = $('lfImageStatus');
+    if (st) st.textContent = 'Reference photo ready';
+    refreshHomeTiles();
+  }
+  async function clearLfReference(){
+    if (!confirm('Remove your Live Swap photo?')) return;
+    const path = lfReferencePath;
+    lfReferenceImageUrl = ''; lfReferenceDescription = ''; lfRefThumb = ''; lfReferencePath = '';
+    try { localStorage.removeItem(lfRefKey()); } catch (_) {}
+    for (const id of ['lfImagePreview', 'prepLfImagePreview']) { const el = $(id); if (el) { el.removeAttribute('src'); el.style.display = 'none'; } }
+    const st = $('lfImageStatus');
+    if (st) st.textContent = 'Add a photo to swap yourself for it, or an outfit/product image';
+    refreshHomeTiles();
+    if (path) { try { await supabase.storage.from('user-uploads').remove([path]); } catch (_) {} }
+  }
+  onTile($('homeSwapTile'), () => {
+    if (lfReferenceImageUrl) showTab('features');
+    else $('lfImageInput').click();
+  });
+  $('homeSwapDelete')?.addEventListener('click', (e) => { e.stopPropagation(); clearLfReference(); });
+
+  // ---- Credits: fal.ai balance, Anam, and WhatsApp minutes
+  const credits = { at: 0, busy: false };
+  function setCredit(key, value, sub, state_){
+    const card = $('credit' + key);
+    if (!card) return;
+    $('credit' + key + 'Value').textContent = value;
+    $('credit' + key + 'Sub').textContent = sub || '\u00a0';
+    card.classList.remove('loading', 'warn');
+    if (state_) card.classList.add(state_);
+  }
+  async function refreshCredits(force){
+    if (!currentUser || credits.busy) return;
+    if (!force && Date.now() - credits.at < 60000) return;
+    credits.busy = true;
+    ['Anam', 'Fal', 'Minutes'].forEach(k => $('credit' + k)?.classList.add('loading'));
+
+    // Anam has no public balance endpoint yet, so this card reflects key status and links to the Lab.
+    if (state.anamKeySet) setCredit('Anam', 'Linked', 'Tap to open Anam Lab');
+    else setCredit('Anam', '—', 'Add your key', 'warn');
+
+    const headers = { ...(await authHeader()) };
+    const fal = (async () => {
+      if (!state.falKeySet) { setCredit('Fal', '—', 'Add your key', 'warn'); return; }
+      try {
+        const r = await fetch('/api/keys?balance=fal', { headers });
+        const d = await r.json();
+        if (typeof d.balance === 'number') {
+          const sym = (d.currency || 'USD') === 'USD' ? '$' : '';
+          setCredit('Fal', `${sym}${d.balance.toFixed(2)}`, sym ? 'credit left' : (d.currency + ' left'));
+        } else if (d.reason === 'needs_admin_key') setCredit('Fal', '—', 'Needs admin key', 'warn');
+        else if (d.reason === 'not_set') setCredit('Fal', '—', 'Add your key', 'warn');
+        else setCredit('Fal', '—', 'Unavailable', 'warn');
+      } catch (_) { setCredit('Fal', '—', 'Unavailable', 'warn'); }
+    })();
+    const mins = (async () => {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 12000);
+      try {
+        const r = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/status', { headers, signal: ctl.signal });
+        if (!r.ok) throw new Error('status ' + r.status);
+        const a = (await r.json()).access;
+        if (!a) throw new Error('no access info');
+        if (a.unlimited) setCredit('Minutes', 'Unlimited', a.plan === 'pro' ? 'Pro plan' : 'Admin');
+        else if (!a.allowed) setCredit('Minutes', '0', a.reason === 'locked' ? 'Locked' : 'Used up', 'warn');
+        else {
+          const n = Number(a.minutesRemaining || 0);
+          setCredit('Minutes', String(Number.isInteger(n) ? n : n.toFixed(1)), 'min left');
+        }
+      } catch (_) { setCredit('Minutes', '—', 'Unavailable', 'warn'); }
+      finally { clearTimeout(timer); }
+    })();
+    await Promise.all([fal, mins]);
+    credits.at = Date.now();
+    credits.busy = false;
+  }
+  $('refreshCreditsBtn')?.addEventListener('click', () => refreshCredits(true));
+  $('creditAnam')?.addEventListener('click', () => {
+    if (state.anamKeySet) window.open('https://lab.anam.ai', '_blank', 'noopener');
+    else $('apiKeysScreen').classList.add('active');
+  });
+  $('creditFal')?.addEventListener('click', () => {
+    if (!state.falKeySet) $('apiKeysScreen').classList.add('active');
+    else if ($('creditFalSub').textContent === 'Needs admin key') window.open('https://fal.ai/dashboard/keys', '_blank', 'noopener');
+    else refreshCredits(true);
+  });
+  $('creditMinutes')?.addEventListener('click', () => refreshCredits(true));
+
+  // ---- Connect accounts page
+  function openAccounts(){ $('accountsScreen').classList.add('active'); fetchConnectedStatus(); }
+  $('homeOpenAccounts')?.addEventListener('click', openAccounts);
+  $('profileOpenAccounts')?.addEventListener('click', openAccounts);
+  $('closeAccounts')?.addEventListener('click', () => $('accountsScreen').classList.remove('active'));
+  $('homeProfileBtn')?.addEventListener('click', () => showTab('profile'));
+
+  function refreshHome(force){
+    refreshHomeHeader();
+    refreshHomeTiles();
+    const wa = $('whatsappAccountBadge');
+    const sum = $('homeAccountsSummary');
+    if (sum) sum.textContent = wa && wa.classList.contains('connected') ? 'WhatsApp connected' : 'WhatsApp, Telegram';
+    refreshCredits(!!force);
   }
 
   supabase.auth.onAuthStateChange((_event, session) => {

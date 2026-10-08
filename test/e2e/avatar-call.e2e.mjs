@@ -158,6 +158,7 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
   await page.goto(`http://127.0.0.1:${APP_PORT}/index.html`);
   await page.waitForFunction(() => document.getElementById('screenHome')?.offsetHeight > 0, { timeout: 15000 });
   say('app loaded and signed in');
+  if (process.env.E2E_HOME_SHOT) { await sleep(5000); await page.screenshot({ path: process.env.E2E_HOME_SHOT }); }
   // contacts tab -> tap the saved contact -> avatar source -> place call
   await page.evaluate(() => [...document.querySelectorAll('.tabBtn[data-tab="contacts"]')].find((b) => b.offsetParent)?.click());
   await page.waitForSelector('#contactsTabList .contactRow', { timeout: 8000 });

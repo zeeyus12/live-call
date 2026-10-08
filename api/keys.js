@@ -75,6 +75,28 @@ export default async function handler(req, res) {
   const userId = await getAuthedUserId(req, supabase);
   if (!userId) return res.status(401).json({ error: 'Not signed in' });
 
+  if (req.method === 'GET' && req.query.balance === 'fal') {
+    // fal.ai credit balance for the Home screen. Lives here (not in its own file)
+    // to stay under Vercel Hobby's function cap. fal only serves this to an
+    // ADMIN-scoped key, so a normal API-scope key comes back as needs_admin_key
+    // and the client shows a hint instead of a number.
+    const falKey = await getProviderKey(supabase, userId, 'fal');
+    if (!falKey) return res.status(200).json({ reason: 'not_set' });
+    try {
+      const r = await fetch('https://api.fal.ai/v1/account/billing?expand=credits', {
+        headers: { Authorization: `Key ${falKey}`, Accept: 'application/json' },
+      });
+      if (r.status === 401 || r.status === 403) return res.status(200).json({ reason: 'needs_admin_key' });
+      if (!r.ok) return res.status(200).json({ reason: 'unavailable', status: r.status });
+      const data = await r.json();
+      const bal = data?.credits?.current_balance;
+      if (typeof bal !== 'number') return res.status(200).json({ reason: 'unavailable' });
+      return res.status(200).json({ balance: bal, currency: data.credits.currency || 'USD' });
+    } catch (err) {
+      return res.status(200).json({ reason: 'unavailable' });
+    }
+  }
+
   if (req.method === 'GET') {
     // Only ever reports whether a key is set, never the key itself - the
     // plaintext key never leaves the vault after the moment it's first saved.
