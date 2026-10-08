@@ -32,14 +32,25 @@ export default async function handler(req, res) {
   if (callsRes.error) return res.status(500).json({ error: callsRes.error.message });
   if (chatsRes.error) return res.status(500).json({ error: chatsRes.error.message });
 
+  // ?days=7|30|90 limits the counts to that window (lastActive stays all-time).
+  const days = [7, 30, 90].includes(Number(req.query?.days)) ? Number(req.query.days) : 0;
+  const since = days ? new Date(Date.now() - days * 864e5).toISOString() : null;
+  const inRange = (ts) => !since || (ts && ts >= since);
+
   const stats = {};
+  const series = new Map();
+  for (let i = (days || 30) - 1; i >= 0; i--) series.set(new Date(Date.now() - i * 864e5).toISOString().slice(0, 10), 0);
   const bump = (userId, field, ts) => {
     if (!userId) return;
     if (!stats[userId]) stats[userId] = { calls: 0, chats: 0, lastActive: null };
-    stats[userId][field]++;
+    if (inRange(ts)) stats[userId][field]++;
     if (ts && (!stats[userId].lastActive || ts > stats[userId].lastActive)) stats[userId].lastActive = ts;
   };
-  (callsRes.data || []).forEach(c => bump(c.user_id, 'calls', c.created_at));
+  (callsRes.data || []).forEach(c => {
+    bump(c.user_id, 'calls', c.created_at);
+    const day = String(c.created_at || '').slice(0, 10);
+    if (inRange(c.created_at) && series.has(day)) series.set(day, series.get(day) + 1);
+  });
   (chatsRes.data || []).forEach(c => bump(c.user_id, 'chats', c.updated_at));
 
   const rows = (usersRes.data || []).map(u => {
@@ -55,5 +66,10 @@ export default async function handler(req, res) {
     };
   }).sort((a, b) => b.total - a.total);
 
-  return res.status(200).json({ users: rows });
+  const totals = {
+    calls: rows.reduce((a, r) => a + r.calls, 0),
+    chats: rows.reduce((a, r) => a + r.chats, 0),
+    activeUsers: rows.filter(r => r.total > 0).length,
+  };
+  return res.status(200).json({ users: rows, totals, series: [...series].map(([d, calls]) => ({ d, calls })), days: days || 'all' });
 }

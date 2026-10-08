@@ -9,15 +9,11 @@
 <link rel="apple-touch-icon" href="icon-192.png" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <style>
-  :root{ --accent:#0f9d68; --coffee:#1e130d; --panel:#3a2a20; --line:rgba(255,222,196,0.14); --dim:rgba(255,230,210,0.55); --tabh:58px; }
+  :root{ --accent:#0f9d68; --coffee:#1e130d; --panel:#3a2a20; --line:rgba(255,222,196,0.14); --dim:rgba(255,230,210,0.55); }
   *{box-sizing:border-box; margin:0; padding:0; -webkit-tap-highlight-color:transparent;}
-  html,body{height:100%;}
-  body{
-    background:var(--coffee); color:#fff; font-family:-apple-system,BlinkMacSystemFont,sans-serif;
-    padding-top:max(env(safe-area-inset-top),20px);
-  }
-  .page{padding:0 18px 24px;}
-  h1{font-size:20px; font-weight:800; margin-bottom:18px;}
+  html,body{height:100%; background:var(--coffee);}
+  body{color:#fff; font-family:-apple-system,BlinkMacSystemFont,sans-serif; overflow:hidden;}
+  h1{font-size:20px; font-weight:800; margin-bottom:14px;}
   .field{margin-bottom:14px;}
   .field label{display:block; font-size:12px; font-weight:600; color:var(--dim); margin-bottom:7px; text-transform:uppercase; letter-spacing:0.03em;}
   .field input, .field textarea{
@@ -25,8 +21,6 @@
     color:#fff; font-size:15px; padding:12px 14px; font-family:inherit; text-align:left; letter-spacing:normal;
   }
   .field textarea{resize:vertical; min-height:84px; line-height:1.4;}
-  /* PIN entry is the one input that should look like a code field - scoped so it
-     never leaks onto ordinary text fields (that was the announcement-field bug). */
   #pinBox .field input{font-size:20px; text-align:center; letter-spacing:0.3em;}
   button{-webkit-appearance:none; appearance:none; border:0; cursor:pointer; font-family:inherit;}
   .btn{
@@ -34,32 +28,47 @@
     background:rgba(15,157,104,0.35); backdrop-filter:blur(20px) saturate(180%); -webkit-backdrop-filter:blur(20px) saturate(180%);
     border:1px solid rgba(15,157,104,0.6);
   }
-  #googleBtn{
-    display:flex; align-items:center; justify-content:center; gap:10px;
-    background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.18);
-  }
+  #googleBtn{display:flex; align-items:center; justify-content:center; gap:10px; background:rgba(255,255,255,0.12); border:1px solid rgba(255,255,255,0.18);}
   #googleBtn svg{background:#fff; border-radius:50%; padding:2px;}
   .hint{font-size:12px; color:var(--dim); margin-top:12px; text-align:center;}
   #signInBox, #pinBox{max-width:320px; margin:70px auto 0; text-align:center; display:block; padding:0 18px;}
   #pinBox{display:none;}
 
-  #app{display:none; padding-bottom:100px;}
-  .tabPanel{display:none;}
-  .tabPanel.active{display:block;}
+  /* Side-panel layout. No safe-area padding; the page fills the screen. */
+  #app{display:none; position:absolute; top:0; left:0; right:0; bottom:0; flex-direction:column; overflow:hidden;}
+  .aBar{display:flex; align-items:center; gap:12px; padding:14px 16px 10px;}
+  .aBar h1{flex:1; margin:0; font-size:20px;}
+  .aIcon{width:42px; height:42px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center; background:rgba(58,42,32,0.65); border:1px solid var(--line); color:#fff; font-size:18px;}
+  .aIcon svg{width:22px; height:22px;}
+  .aChips{display:flex; width:fit-content; margin:0 16px 12px; padding:4px; border-radius:999px; background:rgba(58,42,32,0.65); border:1px solid var(--line);}
+  .aChips button{padding:8px 14px; border-radius:999px; font-size:13.5px; color:var(--dim); background:none;}
+  .aChips button.on{background:var(--accent); color:#fff; font-weight:650;}
+  #aBody{flex:1; overflow-y:auto; padding:6px 16px 28px; -webkit-overflow-scrolling:touch;}
+  .tabPanel{display:none;} .tabPanel.active{display:block;}
+  .aGrid{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  .aCard{background:rgba(58,42,32,0.65); border:1px solid var(--line); border-radius:16px; padding:14px; backdrop-filter:blur(18px) saturate(160%); -webkit-backdrop-filter:blur(18px) saturate(160%);}
+  .aCard.wide{grid-column:1/-1;} .aCard[data-go]{cursor:pointer;}
+  .aCard .l{font-size:13px; color:var(--dim);} .aCard .v{font-size:26px; font-weight:700; margin:4px 0 2px;} .aCard .s{font-size:12px; color:var(--dim);}
+  .aBars{display:flex; align-items:flex-end; gap:2px; height:90px; margin-top:10px;}
+  .aBars i{flex:1; background:var(--accent); border-radius:3px 3px 0 0; min-height:2px; opacity:.9;}
+  #aScrim{position:absolute; inset:0; background:rgba(0,0,0,.55); opacity:0; pointer-events:none; transition:opacity .2s; z-index:20;}
+  #aDrawer{position:absolute; top:0; bottom:0; left:0; width:min(280px,82vw); z-index:21; transform:translateX(-100%); transition:transform .22s; padding:20px 14px; display:flex; flex-direction:column; gap:4px; background:#2a1c14; border-right:1px solid var(--line);}
+  #app.open #aScrim{opacity:1; pointer-events:auto;} #app.open #aDrawer{transform:none;}
+  #aDrawer .brand{display:flex; align-items:center; gap:10px; font-weight:700; font-size:17px; padding:4px 8px 14px;} #aDrawer .brand img{width:36px; height:36px; border-radius:10px;}
+  #aDrawer .nav{text-align:left; padding:13px 14px; border-radius:14px; font-size:15px; color:var(--dim); background:none;}
+  #aDrawer .nav.active{background:rgba(58,42,32,0.9); color:#fff; font-weight:650;}
+  .tabPanel h1{font-size:15px; margin-bottom:10px;}
 
   .userRow{
-    background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:10px;
-    display:flex; justify-content:space-between; align-items:center; gap:12px;
+    background:rgba(58,42,32,0.65); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:10px;
+    display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;
   }
   .userRow .email{font-size:14px; font-weight:600; word-break:break-all;}
   .userRow .date{font-size:11.5px; color:var(--dim); margin-top:2px;}
   .toggleBtn{padding:9px 14px; border-radius:9px; font-size:13px; font-weight:650; flex:none;}
   .toggleBtn.approved{background:var(--accent); color:#fff;}
-  .userRow{flex-wrap:wrap;}
   .waBox{flex-basis:100%; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; padding-top:10px; border-top:1px solid var(--line);}
-  .waState{font-size:12.5px; font-weight:650;}
-  .waState.open{color:#25D366;}
-  .waState.closed{color:#e0a458;}
+  .waState{font-size:12.5px; font-weight:650;} .waState.open{color:#25D366;} .waState.closed{color:#e0a458;}
   .waBtns{display:flex; gap:8px; flex-wrap:wrap;}
   .waBtns .toggleBtn{padding:7px 12px; font-size:12.5px; background:#2a1f1a; color:#fff; border:1px solid var(--line);}
   .waBtns .toggleBtn.approved{background:var(--accent); border-color:var(--accent);}
@@ -68,63 +77,19 @@
 
   .splashBgCard{position:relative; border-radius:12px; overflow:hidden; border:1px solid var(--line); aspect-ratio:9/16; background:var(--panel);}
   .splashBgCard img{width:100%; height:100%; object-fit:cover; display:block;}
-  .splashBgCard button{
-    position:absolute; top:6px; right:6px; width:26px; height:26px; border-radius:50%;
-    background:rgba(0,0,0,0.55); color:#fff; font-size:14px; line-height:1; display:flex; align-items:center; justify-content:center;
-  }
+  .splashBgCard button{position:absolute; top:6px; right:6px; width:26px; height:26px; border-radius:50%; background:rgba(0,0,0,0.55); color:#fff; font-size:14px; line-height:1; display:flex; align-items:center; justify-content:center;}
   .splashBgCard.isDefault{border-color:var(--accent); border-width:2px;}
-  .splashBgCard .starBtn{
-    top:6px; right:auto; left:6px; font-size:13px;
-    background:rgba(0,0,0,0.55);
-  }
+  .splashBgCard .starBtn{top:6px; right:auto; left:6px; font-size:13px; background:rgba(0,0,0,0.55);}
   .splashBgCard .starBtn.active{background:var(--accent);}
-  .defaultTag{
-    position:absolute; bottom:6px; left:6px; right:6px; background:rgba(0,0,0,0.55);
-    color:#fff; font-size:10px; font-weight:650; text-align:center; padding:3px 0; border-radius:6px;
-  }
+  .defaultTag{position:absolute; bottom:6px; left:6px; right:6px; background:rgba(0,0,0,0.55); color:#fff; font-size:10px; font-weight:650; text-align:center; padding:3px 0; border-radius:6px;}
 
-  .statRow{
-    background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:10px;
-    display:flex; justify-content:space-between; align-items:center; gap:12px;
-  }
+  .statRow{background:rgba(58,42,32,0.65); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; gap:12px;}
   .statRow .rank{font-size:13px; font-weight:800; color:var(--dim); width:20px; flex:none;}
   .statRow .email{font-size:14px; font-weight:600; word-break:break-all;}
   .statRow .sub{font-size:11.5px; color:var(--dim); margin-top:2px;}
   .statRow .total{font-size:18px; font-weight:800; color:var(--accent); flex:none; text-align:right;}
   .statRow .totalLbl{font-size:10px; color:var(--dim); font-weight:600; text-transform:uppercase; letter-spacing:0.03em;}
   .emptyState{font-size:13px; color:var(--dim); text-align:center; padding:30px 0;}
-
-  /* Bottom tab nav: a small floating pill, centered, clear of every edge -
-     does not sit flush against the bottom, does not reserve safe-area space,
-     matches the main app's #tabBar treatment for consistency. */
-  #tabBar{
-    position:fixed; left:50%; bottom:16px; transform:translateX(-50%); z-index:50;
-    display:flex; align-items:center; gap:2px;
-    padding:5px;
-    border-radius:20px;
-    background:rgba(58,42,32,0.65);
-    backdrop-filter:blur(20px) saturate(180%); -webkit-backdrop-filter:blur(20px) saturate(180%);
-    border:1px solid rgba(255,255,255,0.12);
-    box-shadow:0 10px 26px rgba(0,0,0,0.45);
-  }
-  #tabGlider{
-    position:absolute; top:5px; left:5px; width:64px; height:52px; border-radius:15px;
-    background:rgba(255,255,255,0.1);
-    backdrop-filter:blur(14px) saturate(180%); -webkit-backdrop-filter:blur(14px) saturate(180%);
-    border:1px solid rgba(255,255,255,0.14);
-    transition:transform 0.32s cubic-bezier(0.34, 1.4, 0.64, 1);
-    z-index:0; pointer-events:none;
-  }
-  #tabBar button{
-    position:relative; z-index:1;
-    flex:none; width:64px; height:52px; background:none; color:var(--dim); display:flex; flex-direction:column;
-    align-items:center; justify-content:center; gap:2px; font-size:9.5px; font-weight:650;
-    border-radius:15px; transition:color 0.2s;
-  }
-  #tabBar button svg{width:19px; height:19px; stroke:currentColor;}
-  #tabBar button.active{color:#fff;}
-  #tabBar button.active svg{stroke:var(--accent);}
-  #tabBar button.active svg.bellIcon{stroke:none; fill:var(--accent);}
 </style>
 </head>
 <body>
@@ -138,7 +103,7 @@
   };
   setTimeout(function(){
     var box = document.getElementById('signInBox');
-    if (box && getComputedStyle(box).display === 'none' && document.getElementById('app').style.display !== 'block') {
+    if (box && getComputedStyle(box).display === 'none' && document.getElementById('app').style.display !== 'flex') {
       var bar = document.getElementById('debugBar');
       bar.style.display = 'block';
       bar.innerHTML = 'Could not load (weak connection?). <button onclick="location.reload()" style="text-decoration:underline; background:none; border:0; color:#fff; font-weight:700;">Tap to retry</button>';
@@ -163,16 +128,18 @@
 </div>
 
 <div id="app">
-
-  <div class="tabPanel active" id="tab-users">
-    <div class="page">
-      <h1>Pending &amp; approved users</h1>
+  <div class="aBar"><button class="aIcon" id="menuBtn" aria-label="Menu"><svg viewBox="0 0 21 21" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><g transform="translate(3 3)"><path d="m2.5.5h10c1.1045695 0 2 .8954305 2 2v10c0 1.1045695-.8954305 2-2 2h-10c-1.1045695 0-2-.8954305-2-2v-10c0-1.1045695.8954305-2 2-2z"/><path d="m12.5 11.5v-8"/></g></svg></button><h1 id="aTitle">Overview</h1><button class="aIcon" id="refreshBtn" aria-label="Refresh">&#x21bb;</button></div>
+  <div class="aChips" id="aChips"><button data-d="7">7 days</button><button data-d="30" class="on">30 days</button><button data-d="90">90 days</button></div>
+  <div id="aBody">
+    <div class="tabPanel active" id="tab-overview"></div>
+    <div class="tabPanel" id="tab-users">
       <div id="rows"></div>
     </div>
-  </div>
-
-  <div class="tabPanel" id="tab-bg">
-    <div class="page">
+    <div class="tabPanel" id="tab-analytics">
+      <p class="hint" style="margin-bottom:14px; text-align:left;">Ranked by calls + chats in the chosen range.</p>
+      <div id="statsRows"></div>
+    </div>
+    <div class="tabPanel" id="tab-bg">
       <h1>Login background</h1>
       <div id="loginBgPreviewWrap" style="display:none; margin-bottom:12px;">
         <img id="loginBgPreview" style="width:100%; border-radius:14px; display:block; border:1px solid var(--line);" />
@@ -197,10 +164,7 @@
       <button class="btn" id="splashBgPickBtn" style="background:rgba(255,255,255,0.1); border-color:rgba(255,255,255,0.18);">Add background</button>
       <p class="hint" id="splashBgHint"></p>
     </div>
-  </div>
-
-  <div class="tabPanel" id="tab-push">
-    <div class="page">
+    <div class="tabPanel" id="tab-push">
       <h1>Send announcement</h1>
       <div class="field"><label>Title</label><input id="announceTitle" type="text" placeholder="e.g. New feature" /></div>
       <div class="field"><label>Message</label><textarea id="announceBody" rows="3" placeholder="What's the announcement?"></textarea></div>
@@ -208,36 +172,13 @@
       <p class="hint" id="announceHint"></p>
     </div>
   </div>
-
-  <div class="tabPanel" id="tab-analytics">
-    <div class="page">
-      <h1>Most active users</h1>
-      <p class="hint" style="margin-bottom:14px; text-align:left;">Ranked by calls + chats. Tap refresh by reopening this tab.</p>
-      <div id="statsRows"></div>
-    </div>
-  </div>
-
+  <div id="aScrim"></div>
+  <nav id="aDrawer">
+    <div class="brand"><img src="icon-192.png" alt="">Live Call Admin</div>
+    <button class="nav active" data-tab="overview">Overview</button><button class="nav" data-tab="users">Users</button>
+    <button class="nav" data-tab="analytics">Analytics</button><button class="nav" data-tab="bg">Backgrounds</button><button class="nav" data-tab="push">Push</button>
+  </nav>
 </div>
-
-<nav id="tabBar">
-  <div id="tabGlider"></div>
-  <button data-tab="users" class="active">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.4"/><path d="M4.5 20c1.6-4 4.4-6 7.5-6s5.9 2 7.5 6"/></svg>
-    Users
-  </button>
-  <button data-tab="bg">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.2"/><circle cx="8.3" cy="9.3" r="1.6"/><path d="M20 15.5l-4.7-4.7a1.5 1.5 0 0 0-2.1 0L4 19.3"/></svg>
-    Backgrounds
-  </button>
-  <button data-tab="push">
-    <svg class="bellIcon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M8.73682 18.8301C9.15103 18.8301 9.48682 19.1659 9.48682 19.5801C9.48682 19.7533 9.53068 19.9323 9.62567 20.1089C9.72135 20.2868 9.86934 20.4625 10.073 20.6194C10.2768 20.7763 10.5283 20.9079 10.8164 20.9998C11.1044 21.0917 11.4174 21.1402 11.7364 21.1402C12.0554 21.1402 12.3684 21.0917 12.6563 20.9998C12.9445 20.9079 13.196 20.7763 13.3998 20.6194C13.6034 20.4625 13.7514 20.2868 13.8471 20.1089C13.9421 19.9323 13.986 19.7533 13.986 19.5801C13.986 19.1659 14.3218 18.8301 14.736 18.8301C15.1502 18.8301 15.486 19.1659 15.486 19.5801C15.486 20.0136 15.3747 20.4354 15.1682 20.8194C14.9624 21.202 14.6685 21.5356 14.315 21.8078C13.9618 22.0799 13.5519 22.2886 13.1122 22.4289C12.6723 22.5692 12.2052 22.6402 11.7364 22.6402C11.2676 22.6402 10.8005 22.5692 10.3606 22.4289C9.92086 22.2886 9.51101 22.0799 9.15774 21.8078C8.80433 21.5356 8.51043 21.202 8.30462 20.8194C8.09812 20.4354 7.98682 20.0136 7.98682 19.5801C7.98682 19.1659 8.3226 18.8301 8.73682 18.8301Z" fill="currentColor"/><path fill-rule="evenodd" clip-rule="evenodd" d="M8.1527 2.50665C10.0555 1.55972 12.2338 1.38369 14.2422 1.98489C14.639 2.10368 14.8644 2.52166 14.7456 2.91847C14.6268 3.31529 14.2088 3.54067 13.812 3.42188C12.1659 2.92913 10.3805 3.07347 8.82097 3.84955C7.08486 4.71351 5.9873 6.48565 5.9873 8.42485L5.9873 9.74613C5.9873 11.1699 5.63253 12.5712 4.95505 13.8234L4.72865 14.2419C3.81979 15.9218 4.81343 17.9997 6.69161 18.3468C10.0265 18.9632 13.4462 18.9632 16.7811 18.3468L16.9413 18.3172C18.8192 17.9701 19.8654 15.9452 19.062 14.2127L18.7974 13.642C18.409 12.8044 18.1565 11.9127 18.0473 11.0003C17.9981 10.589 18.2916 10.2157 18.7029 10.1665C19.1142 10.1173 19.4875 10.4108 19.5367 10.8221C19.6272 11.5781 19.8364 12.317 20.1582 13.0109L20.4228 13.5817C21.6385 16.203 20.0553 19.2671 17.214 19.7922L17.0776 19.0547L17.2139 19.7922L17.0538 19.8218C13.5386 20.4716 9.93413 20.4716 6.41897 19.8218C3.53934 19.2896 2.01589 16.1037 3.40935 13.5281L3.63576 13.1096C4.19463 12.0766 4.4873 10.9206 4.4873 9.74613L4.4873 8.42485C4.4873 5.91646 5.90701 3.62418 8.1527 2.50665Z" fill="currentColor"/><path fill-rule="evenodd" clip-rule="evenodd" d="M17.8602 4.28711C16.8937 4.28711 16.1102 5.07061 16.1102 6.03711C16.1102 7.00361 16.8937 7.78711 17.8602 7.78711C18.8267 7.78711 19.6102 7.00361 19.6102 6.03711C19.6102 5.07061 18.8267 4.28711 17.8602 4.28711ZM14.6102 6.03711C14.6102 4.24218 16.0653 2.78711 17.8602 2.78711C19.6552 2.78711 21.1102 4.24218 21.1102 6.03711C21.1102 7.83203 19.6552 9.28711 17.8602 9.28711C16.0653 9.28711 14.6102 7.83203 14.6102 6.03711Z" fill="currentColor"/></svg>
-    Push
-  </button>
-  <button data-tab="analytics">
-    <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M11 20V4M18 20v-7"/></svg>
-    Analytics
-  </button>
-</nav>
 
 <script type="module">
   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -304,38 +245,69 @@
     }
   });
 
-  // ---- Tabs ----
-  const TABS = ['users', 'bg', 'push', 'analytics'];
-  function moveTabGlider(name){
-    const glider = $('tabGlider');
-    const btn = document.querySelector(`#tabBar button[data-tab="${name}"]`);
-    if (!glider || !btn) return;
-    const barRect = $('tabBar').getBoundingClientRect();
-    const btnRect = btn.getBoundingClientRect();
-    if (btnRect.width === 0) return;
-    glider.style.transform = `translateX(${btnRect.left - barRect.left - 5}px)`;
+  // ---- Side panel ----
+  const TABS = ['overview', 'users', 'analytics', 'bg', 'push'];
+  const TITLES = { overview: 'Overview', users: 'Users', analytics: 'Analytics', bg: 'Backgrounds', push: 'Push' };
+  let range = 30, current = 'overview';
+  const fitHeight = () => { if (window.navigator.standalone) document.body.style.height = Math.max(window.innerHeight, window.screen.height || 0) + 'px'; };
+  fitHeight(); window.addEventListener('resize', fitHeight);
+  async function adminFetch(path){
+    const { data: { session } } = await supabase.auth.getSession();
+    const r = await fetch(path, { headers: { Authorization: `Bearer ${session.access_token}` } });
+    const data = await safeJson(r);
+    if (!r.ok) throw new Error(data.error || 'Request failed');
+    return data;
   }
   function showTab(name){
-    TABS.forEach(t => {
-      $('tab-' + t).classList.toggle('active', t === name);
-    });
-    document.querySelectorAll('#tabBar button').forEach(b => {
-      b.classList.toggle('active', b.dataset.tab === name);
-    });
-    moveTabGlider(name);
+    current = name;
+    $('app').classList.remove('open');
+    TABS.forEach(t => $('tab-' + t).classList.toggle('active', t === name));
+    document.querySelectorAll('#aDrawer .nav').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+    $('aTitle').textContent = TITLES[name];
+    $('aChips').style.display = name === 'overview' || name === 'analytics' ? '' : 'none';
+    $('aBody').scrollTop = 0;
+    if (name === 'overview') loadOverview();
     if (name === 'analytics') loadAnalytics();
+    if (name === 'users') loadUsers();
   }
-  document.querySelectorAll('#tabBar button').forEach(btn => {
-    btn.addEventListener('click', () => showTab(btn.dataset.tab));
-  });
-  window.addEventListener('resize', () => moveTabGlider(document.querySelector('#tabBar button.active')?.dataset.tab || 'users'));
-  setTimeout(() => moveTabGlider('users'), 50);
+  $('menuBtn').addEventListener('click', () => $('app').classList.add('open'));
+  $('aScrim').addEventListener('click', () => $('app').classList.remove('open'));
+  $('refreshBtn').addEventListener('click', () => showTab(current));
+  document.querySelectorAll('#aDrawer .nav').forEach(btn => btn.addEventListener('click', () => showTab(btn.dataset.tab)));
+  document.querySelectorAll('#aChips button').forEach(btn => btn.addEventListener('click', () => {
+    range = Number(btn.dataset.d);
+    document.querySelectorAll('#aChips button').forEach(b => b.classList.toggle('on', b === btn));
+    showTab(current);
+  }));
+
+  const card = (l, v, sub, go) => `<div class="aCard"${go ? ` data-go="${go}"` : ''}><div class="l">${l}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`;
+  async function loadOverview(){
+    const el = $('tab-overview');
+    el.innerHTML = '<p class="emptyState">Loading…</p>';
+    try {
+      const [u, a] = await Promise.all([adminFetch('/api/admin-list-users'), adminFetch('/api/admin-analytics?days=' + range)]);
+      const approved = u.users.filter(x => x.approved).length;
+      const pending = u.users.length - approved;
+      const waOpen = u.users.filter(x => x.whatsapp && x.whatsapp.allowed).length;
+      const pro = u.users.filter(x => x.whatsapp && x.whatsapp.plan === 'pro').length;
+      const max = Math.max(...a.series.map(x => x.calls), 1);
+      el.innerHTML = `<div class="aGrid">
+        ${card('Users', u.users.length, `${approved} approved`, 'users')}
+        ${card('Pending', pending, pending ? 'tap to review' : 'all approved', 'users')}
+        ${card('Calls', a.totals.calls, `last ${range} days`, 'analytics')}
+        ${card('Chats', a.totals.chats, `last ${range} days`, 'analytics')}
+        ${card('Active users', a.totals.activeUsers, `of ${u.users.length}`, 'analytics')}
+        ${card('WhatsApp open', waOpen, `${pro} pro`, 'users')}
+        <div class="aCard wide"><div class="l">Daily calls</div><div class="aBars">${a.series.map(x => `<i title="${x.d}: ${x.calls}" style="height:${Math.max(2, (x.calls / max) * 100)}%"></i>`).join('')}</div></div>
+      </div>`;
+      el.querySelectorAll('[data-go]').forEach(c => c.addEventListener('click', () => showTab(c.dataset.go)));
+    } catch (err) { el.innerHTML = `<p class="emptyState">${String(err.message).replace(/</g, '&lt;')}</p>`; }
+  }
 
   function loadApp(){
     $('pinBox').style.display = 'none';
-    $('app').style.display = 'block';
-    showTab('users');
-    loadUsers();
+    $('app').style.display = 'flex';
+    showTab('overview');
     loadLoginBg();
     loadChatBg();
     loadSplashBgs();
@@ -619,7 +591,7 @@
   async function loadAnalytics(){
     $('statsRows').innerHTML = '<p class="emptyState">Loading…</p>';
     const { data: { session } } = await supabase.auth.getSession();
-    const r = await fetch('/api/admin-analytics', { headers: { Authorization: `Bearer ${session.access_token}` } });
+    const r = await fetch('/api/admin-analytics?days=' + range, { headers: { Authorization: `Bearer ${session.access_token}` } });
     const data = await r.json();
     if (!r.ok) { $('statsRows').innerHTML = `<p class="emptyState">${data.error}</p>`; return; }
     if (!data.users.length) { $('statsRows').innerHTML = '<p class="emptyState">No user activity yet.</p>'; return; }
