@@ -3691,6 +3691,37 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (ws.readyState === WebSocket.OPEN) send();
       else ws.addEventListener('open', send, { once: true });
     },
+    // Builds the outgoing-audio graph (0x02 frames) from a stream. Used with the
+    // microphone, or with the avatar's own voice when an avatar places the call.
+    attachAudioStream(audioStream, voiceConversion){
+      if (this.audioProcessor) { try { this.audioProcessor.disconnect(); } catch(e){} this.audioProcessor = null; }
+      if (this.micAudioCtx) { try { this.micAudioCtx.close(); } catch(e){} this.micAudioCtx = null; }
+      if (audioStream && audioStream.getAudioTracks().length) {
+        try {
+          const bufferSize = voiceConversion ? 512 : 2048;
+          this.micAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+          const source = this.micAudioCtx.createMediaStreamSource(audioStream);
+          this.audioProcessor = this.micAudioCtx.createScriptProcessor(bufferSize, 1, 1);
+          this.audioProcessor.onaudioprocess = (evt) => {
+            if (!this.active || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+            const input = evt.inputBuffer.getChannelData(0);
+            const pcm16 = new Int16Array(input.length);
+            for (let i = 0; i < input.length; i++) {
+              const s = Math.max(-1, Math.min(1, input[i]));
+              pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            const tagged = new Uint8Array(pcm16.buffer.byteLength + 1);
+            // 0x02 = live outgoing call audio. When conversion is running, the
+            // server routes this through RVC instead of sending it to the call.
+            tagged[0] = 0x02;
+            tagged.set(new Uint8Array(pcm16.buffer), 1);
+            this.ws.send(tagged);
+          };
+          source.connect(this.audioProcessor);
+          this.audioProcessor.connect(this.micAudioCtx.destination);
+        } catch(e){}
+      }
+    },
     startStreaming(stream, micStream, options = {}){
       const voiceConversion = !!options.voiceConversion;
       // WaCalls carries its own call media (see WaCallsMediaLeg): the avatar
@@ -3741,32 +3772,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // that much latency before conversion even starts. With conversion off
       // the original buffer size is kept exactly as it was.
       const audioStream = voiceConversion && !waCallsLeg ? outgoingCallAudioStream() : micStream;
-      if (audioStream && audioStream.getAudioTracks().length) {
-        try {
-          const bufferSize = voiceConversion ? 512 : 2048;
-          this.micAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-          const source = this.micAudioCtx.createMediaStreamSource(audioStream);
-          this.audioProcessor = this.micAudioCtx.createScriptProcessor(bufferSize, 1, 1);
-          this.audioProcessor.onaudioprocess = (evt) => {
-            if (!this.active || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-            const input = evt.inputBuffer.getChannelData(0);
-            const pcm16 = new Int16Array(input.length);
-            for (let i = 0; i < input.length; i++) {
-              const s = Math.max(-1, Math.min(1, input[i]));
-              pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-            }
-            const tagged = new Uint8Array(pcm16.buffer.byteLength + 1);
-            // 0x02 = live outgoing call audio (the audio that goes out with
-            // the Lucy 2.5 video). When conversion is running, the server
-            // routes this through RVC instead of sending it to the call.
-            tagged[0] = 0x02;
-            tagged.set(new Uint8Array(pcm16.buffer), 1);
-            this.ws.send(tagged);
-          };
-          source.connect(this.audioProcessor);
-          this.audioProcessor.connect(this.micAudioCtx.destination);
-        } catch(e){}
-      }
+      this.attachAudioStream(audioStream, voiceConversion);
     },
     stop(){
       this.active = false;
@@ -4082,6 +4088,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     if (srcLabel) srcLabel.textContent = selectedCallSource === 'avatar' ? 'AI Avatar (Anam)' : 'Live Swap / Lucy 2.5';
     syncAvatarSourceUi();
     LucyVoice.renderVoiceUi?.();
+    if (!updatePrepMicRow()) {
+      if (socialMicStream) { $('prepMicStatus').textContent = 'Microphone: Active'; $('prepEnableMicBtn').style.display = 'none'; }
+      else { $('prepMicStatus').textContent = 'Microphone: Click to allow'; $('prepEnableMicBtn').style.display = 'inline-block'; }
+    }
 
     if (previous !== selectedCallSource) {
       WaCallsMediaLeg.setAvatarSource(selectedCallSource);
@@ -4225,6 +4235,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         startRingback(); // keep playing through connecting - stops only once truly connected
       } else if (msg.state === 'connected') {
         fireCallAnswered();
+        if (avatarGateActive && !callConnectedAt) { callConnectedAt = Date.now(); trace('call connected'); scheduleAvatarGreeting(); }
         if (lbl) lbl.textContent = 'Connected';
         const idle = $('socialCallIdle');
         if (idle) idle.style.display = 'none';
@@ -5057,7 +5068,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       : '<span style="color:#2AABEE;"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/></svg></span>';
 
     // Mic check
-    if (socialMicStream) {
+    if (updatePrepMicRow()) {} else if (socialMicStream) {
       $('prepMicStatus').textContent = 'Microphone: Active';
       $('prepEnableMicBtn').style.display = 'none';
     } else {
@@ -5077,6 +5088,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     renderWaEngineUi();
   }
 
+  // Avatar calls on Telegram use the avatar's own audio, so the mic row is replaced by a note.
+  function updatePrepMicRow(){
+    if (selectedCallSource === 'avatar' && currentSocialPlatform === 'telegram') {
+      $('prepMicStatus').textContent = 'Microphone: Not needed (avatar speaks)';
+      $('prepEnableMicBtn').style.display = 'none';
+      return true;
+    }
+    return false;
+  }
   $('prepEnableMicBtn')?.addEventListener('click', async () => {
     try {
       socialMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -5500,11 +5520,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     // WhatsApp through WaCalls with an Anam avatar: nothing from the caller's
     // own devices is used. The avatar listens to the callee and speaks to them.
     const avatarOnWaCalls = selectedCallSource === 'avatar' && currentSocialPlatform === 'whatsapp' && waEngine() === 'wacalls';
+    // Telegram with an avatar: the avatar listens to the callee and speaks for itself,
+    // so no microphone or camera is ever requested.
+    const avatarOnTelegram = selectedCallSource === 'avatar' && currentSocialPlatform === 'telegram';
+    const avatarNoMic = avatarOnWaCalls || avatarOnTelegram;
 
     try {
-      if (avatarOnWaCalls) CalleeAudioBus.start(); // inside the tap, so the audio context is allowed to run
-      resetAvatarGate(avatarOnWaCalls);
-      if (!avatarOnWaCalls && !socialMicStream) {
+      if (avatarNoMic) CalleeAudioBus.start(); // inside the tap, so the audio context is allowed to run
+      resetAvatarGate(avatarNoMic);
+      if (!avatarNoMic && !socialMicStream) {
         try {
           socialMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
           $('prepMicStatus').textContent = 'Microphone: Active';
@@ -5697,6 +5721,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         // stays for the event stream and the RVC return path only.
         waCalls: currentCallEngine === 'wacalls',
       });
+      if (avatarOnTelegram) {
+        // The avatar's voice is the call audio (no microphone). It arrives a moment after the video.
+        const voice = await waitForAvatarAudio(30000);
+        if (cancelled()) return;
+        if (voice) SocialCallMediaAdapter.attachAudioStream(voice, false);
+        else console.warn('[Telegram] the avatar produced no audio track - the callee will not hear it');
+        avatarReadyForGreeting = true; scheduleAvatarGreeting();
+      }
 
     } catch(err) {
       if (cancelled()) return; // End was pressed: endSocialCall() already cleaned up
