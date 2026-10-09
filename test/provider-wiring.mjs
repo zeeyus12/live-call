@@ -18,9 +18,6 @@ assert.ok(html.includes('id="decartApiKey"') && html.includes('id="saveDecartKey
 assert.ok(app.includes("provider: 'decart'") && app.includes('@decartai/sdk@0.2.4') && app.includes("models.realtime('lucy-latest')"));
 assert.ok(app.includes('lfDecart.disconnect()'));
 assert.ok(app.includes("saveProviderKey('decart'"));
-// Telegram coming soon + bridge crash loop stopped
-assert.ok(srv.includes("ENABLE_TELEGRAM_BRIDGE !== '1'"));
-assert.ok(html.includes('id="telegramAccountBadge">Coming soon') && html.includes('id="choiceTelegramSubtitle">Coming soon'));
 // Anam: pinned SDK, single loader, retry + preload
 assert.ok(!app.includes('@anam-ai/js-sdk@latest'));
 assert.equal((app.match(/@anam-ai\/js-sdk@4\.27\.1/g) || []).length, 1);

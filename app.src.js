@@ -677,7 +677,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const query = handle ? '@' + handle : (contact ? contact.target : number);
       note(`Calling ${contact ? contact.name : query} on Telegram…`);
       fetch(SOCIAL_CALL_API_BASE + '/api/social-call/telegram/resolve', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, name: contact ? contact.name : '' }),
       }).then(async (res) => {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.id) { note(data.error || 'Could not find that Telegram user.'); openContactPicker('telegram'); return; }

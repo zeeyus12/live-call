@@ -302,6 +302,53 @@ async def handle_contacts(request):
     except Exception as e:
         return web.json_response({"error": str(e), "contacts": []}, status=500)
 
+class NotOnTelegram(Exception):
+    pass
+
+async def resolve_user(cl, query, name="", make_contact=None):
+    """Resolve @username / numeric id / phone number to a Telegram user.
+
+    Pyrogram's get_users() only looks in the local peer cache, so a phone
+    number we've never met raises PEER_ID_INVALID (KeyError/PeerIdInvalid).
+    For phone numbers we fall back to importing the number as a contact,
+    which is the only way Telegram lets us look a number up. The person is
+    then saved in the account's Telegram contacts."""
+    q = str(query).strip()
+    digits = "".join(ch for ch in q if ch.isdigit())
+    is_phone = bool(digits) and not q.lstrip("@").isalpha() and (
+        q.startswith("+") or len(digits) >= 7)
+    # A bare digit string may be a Telegram user id or a phone number: try
+    # the id first, then the phone form.
+    tries = [q]
+    if is_phone:
+        tries = ([int(digits)] if not q.startswith("+") else []) + ["+" + digits]
+    for cand in tries:
+        try:
+            user = await cl.get_users(cand)
+            if isinstance(user, list):
+                user = user[0] if user else None
+            if user:
+                return user
+        except Exception as e:
+            msg = str(e)
+            known = ("PEER_ID_INVALID" in msg or "USERNAME_NOT_OCCUPIED" in msg
+                     or "Peer id invalid" in msg or isinstance(e, KeyError))
+            if not known:
+                raise
+            if not is_phone:
+                raise NotOnTelegram("No Telegram user found for that username")
+    if not is_phone:
+        raise NotOnTelegram("No Telegram user found for that username")
+    if make_contact is None:
+        from pyrogram.types import InputPhoneContact
+        make_contact = InputPhoneContact
+    contact = make_contact(phone="+" + digits, first_name=(name or "Live Call").strip() or "Live Call")
+    res = await cl.import_contacts([contact])
+    users = getattr(res, "users", None) or []
+    if not users:
+        raise NotOnTelegram("That number isn't on Telegram")
+    return users[0]
+
 async def handle_resolve(request):
     """Resolves a typed phone number or @username to a real Telegram user
     (numeric id, name, username) via the authenticated account's own
@@ -318,11 +365,10 @@ async def handle_resolve(request):
         cl = await get_client_async()
         if not cl.is_connected:
             await cl.connect()
-        user = await cl.get_users(query)
-        if isinstance(user, list):
-            user = user[0] if user else None
-        if not user:
-            return web.json_response({"error": "No Telegram user found for that number/username"}, status=404)
+        try:
+            user = await resolve_user(cl, query, data.get("name") or "")
+        except NotOnTelegram as e:
+            return web.json_response({"error": str(e)}, status=404)
         return web.json_response({
             "id": user.id,
             "first_name": user.first_name or "",
