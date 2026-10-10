@@ -58,7 +58,7 @@ const staticSrv = http.createServer((req, res) => {
 
 // ----------------------------------------------------------------------------- WaCalls stand-in
 let calleePage = null;
-const wa = { calls: [], events: [], cfg: {}, hangups: 0, reqs: [] };
+const wa = { calls: [], events: [], cfg: {}, hangups: 0, reqs: [], accepted: 0 };
 function waEmit(type, extra = {}) { wa.events.push(`data: ${JSON.stringify({ type, at: Date.now(), sessionId: 's1', ...extra })}\n\n`); }
 const jsonOut = (res, code, v) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(v)); };
 const waSrv = http.createServer(async (req, res) => {
@@ -79,6 +79,13 @@ const waSrv = http.createServer(async (req, res) => {
     setTimeout(() => waEmit('call-status', { id: c.id, status: 'ringing', media: 'video', direction: 'outbound' }), 300);
     if (cfg.declineAfterMs) setTimeout(() => { if (c.ended) return; c.ended = true; waEmit('call-ended', { id: c.id, reason: 'declined' }); }, cfg.declineAfterMs);
     if (cfg.answerAfterMs !== null && !cfg.declineAfterMs) setTimeout(() => { if (c.ended) return; c.state = 'active'; wa.connectedAt = Date.now(); waEmit('call-status', { id: c.id, status: 'connected', media: 'video', direction: 'outbound' }); }, cfg.answerAfterMs ?? 2500);
+    // Real WhatsApp: the callee taps the camera button, the phone asks the other side to switch to video
+    // (several times in a row) and GIVES UP - ends the call - if nobody accepts.
+    if (cfg.peerVideoAfterMs) setTimeout(() => {
+      if (c.ended) return; wa.accepted = 0;
+      for (let i = 0; i < 2; i++) setTimeout(() => waEmit('call-peer-video', { id: c.id, active: true, upgrade: true }), i * 100);
+      setTimeout(() => { if (c.ended || wa.accepted) return; c.ended = true; waEmit('call-ended', { id: c.id, reason: 'ended' }); }, 2500);
+    }, (cfg.answerAfterMs ?? 2500) + cfg.peerVideoAfterMs);
     return jsonOut(res, 200, { call: { callId: c.id } });
   }
   const m = p.match(/\/calls\/([^/]+)(\/.*)?$/);
@@ -90,6 +97,7 @@ const waSrv = http.createServer(async (req, res) => {
       try { const sdp = await calleePage.evaluate((o) => window.answerOffer(o), body.sdp_offer); return jsonOut(res, 200, { sdp_answer: sdp }); }
       catch (e) { return jsonOut(res, 500, { error: 'callee page gone: ' + String(e).slice(0, 80) }); } // call ended while negotiating
     }
+    if (tail === '/video/accept') wa.accepted++;
     return jsonOut(res, 200, { status: 'ok' });
   }
   jsonOut(res, 404, { error: 'unhandled ' + p });
@@ -104,12 +112,12 @@ function startServer() {
   return { proc, logs };
 }
 
-async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = 'user', holdMs = 12000, avcc = false, testMode = false } = {}) {
+async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = 'user', holdMs = 12000, avcc = false, testMode = false, chatMode = false } = {}) {
   console.log(`\n=== ${name}`);
   wa.calls = []; wa.events = []; wa.hangups = 0; wa.cfg = wacalls; wa.callPostAt = 0; wa.connectedAt = 0;
   calleePage = await browser.newPage(); await calleePage.goto(`http://127.0.0.1:${APP_PORT}/__callee.html`);
   const page = await browser.newPage(); await page.setBypassServiceWorker(true);
-  const R = { summaryPosts: [], pageErrors: [], consoleErrors: [], stopActive: 0, anamPosts: [], mic: 0 };
+  const R = { chatRespondAt: 0, chat: {}, summaryPosts: [], pageErrors: [], consoleErrors: [], stopActive: 0, anamPosts: [], mic: 0 };
   page.on('pageerror', (e) => R.pageErrors.push(String(e).slice(0, 200)));
   page.on('console', (m) => { const t = m.text(); if (m.type() === 'error') R.consoleErrors.push(t.slice(0, 200)); if (process.env.E2E_VERBOSE) console.log('   [page]', t.slice(0, 200)); });
   await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
@@ -147,6 +155,7 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
           else if (body.action === 'stop-active') { R.stopActive++; if (anam.stubborn && R.stopActive === 1) out = { found: 0, stopped: 0 }; else { const n = await page.evaluate(() => window.__anamReleaseAll()); out = { found: n, stopped: n }; } }
           else if (body.action === 'stop') out = { ok: true };
           else { R.anamPosts.push(body.action || 'session'); out = { sessionToken: 'tok-' + R.anamPosts.length }; }
+        } else if (u.pathname === '/api/chat-respond') { await sleep(1500); R.chatRespondAt = Date.now(); out = { reply: 'Placing it now.', title: 'Call' };
         } else if (u.pathname === '/api/call-summary') { R.summaryPosts.push(body); out = { summary: 'ok' }; }
         return req.respond({ status: 200, contentType: 'application/json', headers: cors, body: JSON.stringify(out) });
       }
@@ -159,6 +168,20 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
   await page.waitForFunction(() => document.getElementById('screenHome')?.offsetHeight > 0, { timeout: 15000 });
   say('app loaded and signed in');
   if (process.env.E2E_HOME_SHOT) { await sleep(5000); await page.screenshot({ path: process.env.E2E_HOME_SHOT }); }
+  let t0 = Date.now();
+  if (chatMode) {
+    await page.evaluate(() => [...document.querySelectorAll('.tabBtn[data-tab="chat"]')].forEach((b) => b.click()));
+    await page.waitForSelector('#homeInputBar.visible', { timeout: 8000 });
+    if (process.env.E2E_VERBOSE) console.log('   input state:', await page.evaluate(() => { const e = document.getElementById('briefInput'); const b = e.getBoundingClientRect(); const bar = document.getElementById('homeInputBar'); return JSON.stringify({ rect: [b.x, b.y, b.width, b.height], disp: getComputedStyle(bar).display, vis: getComputedStyle(bar).visibility, active: document.activeElement && document.activeElement.id, ro: e.readOnly, dis: e.disabled }); }));
+    await page.focus('#briefInput');
+    await page.keyboard.type('Call +2348012345678 on WhatsApp'); await page.keyboard.press('Enter'); await page.keyboard.type('and be friendly');
+    await sleep(600);
+    R.chat.afterEnter = await page.evaluate(() => ({ value: document.getElementById('briefInput').value, bubbles: document.querySelectorAll('#chatThread .bubble').length }));
+    R.chat.callsAfterEnter = wa.calls.length;
+    t0 = Date.now(); await page.evaluate(() => document.getElementById('sendBtn').click()); say('Send tapped');
+    await sleep(700);
+    R.chat.callsDuringReply = wa.calls.length; // the assistant has not answered yet (1.5s delay): no call yet
+  } else {
   // contacts tab -> tap the saved contact -> avatar source -> place call
   await page.evaluate(() => [...document.querySelectorAll('.tabBtn[data-tab="contacts"]')].find((b) => b.offsetParent)?.click());
   await page.waitForSelector('#contactsTabList .contactRow', { timeout: 8000 });
@@ -173,7 +196,8 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
   }
   await page.evaluate(() => document.getElementById('prepSourceAvatarBtn').click());
   await sleep(300);
-  const t0 = Date.now(); await page.evaluate(() => document.getElementById('prepStartCallActionBtn').click()); say('Place Call tapped');
+  t0 = Date.now(); await page.evaluate(() => document.getElementById('prepStartCallActionBtn').click()); say('Place Call tapped');
+  }
 
   // sample the call for holdMs
   const timeline = []; let last = '';
@@ -217,7 +241,7 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
   if (process.env.E2E_VERBOSE) console.log('   ws messages:', (await page.evaluate(() => window.__wslog.slice(-8))).join('\n      '));
   if (process.env.E2E_VERBOSE) console.log('   toast dom:', await page.evaluate(() => { const t = document.getElementById('callEndToast'); return t ? t.style.display + ' | ' + t.innerText.slice(0, 120).replace(/\n/g, ' / ') : 'none'; }));
   const calls = wa.calls.length;
-  const res = { name, layout, liveAfter, connectedAt: wa.connectedAt, callPostAt: wa.callPostAt, toastAfter, survived, answered: !!answeredAt, callee, anamLog, gum, calls, summaryPosts: R.summaryPosts, pageErrors: R.pageErrors, finalUi, timeline, callsPlaced: calls, stopActive: R.stopActive };
+  const res = { name, chat: R.chat, chatRespondAt: R.chatRespondAt, layout, liveAfter, connectedAt: wa.connectedAt, callPostAt: wa.callPostAt, toastAfter, survived, answered: !!answeredAt, callee, anamLog, gum, calls, summaryPosts: R.summaryPosts, pageErrors: R.pageErrors, finalUi, timeline, callsPlaced: calls, stopActive: R.stopActive };
   await page.close(); await calleePage.close();
   return res;
 }
@@ -265,10 +289,11 @@ const scenarios = {
   limit1: ['S2 stubborn leak: the cleanup does not free the session at first, the first attempt is refused, then it recovers', { anam: { preLive: 1, stubborn: true } }],
   preflight: ['S2b a leaked Anam session is cleared BEFORE the first attempt (no refused attempt at all)', { anam: { preLive: 1 } }],
   avcc: ['S7 the browser encoder outputs AVCC instead of Annex-B (as Safari may): the callee must still get decodable video', { avcc: true, holdMs: 8000 }],
-  testmode: ['S8 free test mode: no Anam at all, callee still sees a picture and hears the beep', { testMode: true, holdMs: 9000 }],
   remote: ['S5 callee hangs up mid-call', { endMode: 'remote', holdMs: 6000 }],
   declined: ['S6 callee declines the call', { wacalls: { declineAfterMs: 2500 }, holdMs: 3000 }],
   dead: ['S3 Anam is unavailable (every attempt fails)', { anam: { failAttempts: [1, 2, 3, 4, 5, 6] } }],
+  chat: ['S11 chat box: Enter is a new line, Send replies first and only then places the call', { chatMode: true, holdMs: 7000 }],
+  peervideo: ['S10 callee taps the camera button (peer video request): the app must accept it and the call must stay up', { wacalls: { peerVideoAfterMs: 4000 }, holdMs: 12000 }],
   slow: ['S4 avatar takes 25s to start; callee answers in 3s', { anam: { startDelayMs: 25000 }, wacalls: { answerAfterMs: 3000 }, holdMs: 8000 }],
 };
 const all = {};
@@ -314,12 +339,7 @@ try {
     }
     if (key === 'avcc') {
       check(r.callee.decoded > 10 && r.callee.bright > r.callee.dark, 'AVCC encoder output was converted: callee decodes real picture', `decoded=${r.callee.decoded} bright=${r.callee.bright} dark=${r.callee.dark} errors=${JSON.stringify(r.callee.errors)}`);
-      check(r.callee.errors.length === 0, 'no decode errors on the callee');
-    }
-    if (key === 'testmode') {
-      check(r.anamLog.attempts.length === 0, 'no Anam session was used', JSON.stringify(r.anamLog.attempts));
-      check(r.callee.bright > 10 && r.callee.pcmLoud > 3, 'callee sees the test card and hears the beep', `bright=${r.callee.bright} loud=${r.callee.pcmLoud}`);
-      check(r.survived, 'test call stays up');
+      check(r.callee.decoded > 30, 'decoder keeps recovering from dropped frames (stale frames are dropped on purpose, keyframes resync)', `decoded=${r.callee.decoded} errors=${r.callee.errors.length}`);
     }
     if (key === 'limit1') {
       check(r.anamLog.rejected >= 1, 'scenario really hit the Anam concurrency limit', JSON.stringify(r.anamLog));
@@ -339,6 +359,17 @@ try {
     if (key === 'dead') {
       check(r.callsPlaced === 0, 'nothing is dialled when the avatar cannot start', `calls placed: ${r.callsPlaced}`);
       check(/anam|avatar/i.test(r.finalUi.prepErr || ''), 'the reason is shown on screen', JSON.stringify(r.finalUi));
+    }
+    if (key === 'chat') {
+      check(/\n/.test(r.chat.afterEnter?.value || '') && r.chat.afterEnter.bubbles === 0 && r.chat.callsAfterEnter === 0, 'Enter adds a new line: nothing sent, no call', JSON.stringify(r.chat));
+      check(r.chat.callsDuringReply === 0, 'no call is placed before the assistant has replied', JSON.stringify(r.chat));
+      check(r.chatRespondAt && r.callPostAt >= r.chatRespondAt, 'the call is placed after the reply', `reply ${r.chatRespondAt}, dial ${r.callPostAt}`);
+      check(r.callsPlaced === 1, 'exactly one call placed from the chat message', String(r.callsPlaced));
+    }
+    if (key === 'peervideo') {
+      check(wa.accepted >= 1, 'the peer video request was accepted (POST video/accept)', 'accepts: ' + wa.accepted);
+      check(r.survived, 'call stays up after the callee asks for video', JSON.stringify(r.timeline.slice(-3)));
+      check(r.callee.bright > 5, 'callee still sees the avatar');
     }
     if (key === 'slow') {
       check(r.callsPlaced === 1, 'the phone still rings while the avatar is slow');

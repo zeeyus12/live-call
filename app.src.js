@@ -549,8 +549,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
   }
   $('briefInput')?.addEventListener('input', autoGrow);
+  // Enter is a new line (phones have no Shift key, and a long brief needs paragraphs). Only the Send button
+  // sends, plus Ctrl/Cmd+Enter on a keyboard.
   $('briefInput')?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChatMessage(); }
   });
   $('sendBtn')?.addEventListener('click', sendChatMessage);
   async function saveProviderKey(provider, inputId, btnId, onSaved){
@@ -697,7 +699,8 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     $('briefInput').value = ''; autoGrow();
     chatMessages.push({ role: 'user', content: text });
     renderChatThread();
-    if (handleCallIntent(text)) return;
+    // A call request is answered by the assistant FIRST; the call is placed after its reply is on screen.
+    const wantsCall = !!detectCallIntent(text);
 
     chatMessages.push({ role: 'assistant', content: '…' });
     const thinkingIdx = chatMessages.length - 1;
@@ -719,9 +722,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (r.ok && data.title) saveChat(data.title);
       else saveChat();
     } catch (e) {
-      chatMessages[thinkingIdx] = { role: 'assistant', content: 'Connection error — try again.' };
+      chatMessages[thinkingIdx] = { role: 'assistant', content: wantsCall ? 'On it.' : 'Connection error — try again.' };
       renderChatThread();
     }
+    if (wantsCall) handleCallIntent(text);
   }
 
   function startNewChat(){
@@ -3863,8 +3867,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     if (r === 'declined' || r === 'reject' || r === 'rejected') return 'the other person declined';
     if (r === 'busy') return 'the other person is busy';
     if (r === 'timeout' || r === 'no_answer' || r === 'unanswered') return 'nobody answered';
-    if (r === 'user_ended' || r === 'ended' || r === 'remote_ended' || r === 'hangup') return 'the other side hung up';
-    return reason ? String(reason) : 'unknown reason';
+    if (r === 'user_ended' || r === 'remote_ended' || r === 'hangup') return 'the other side hung up';
+    if (r === 'ended' || r === '') return 'the call was closed and WhatsApp gave no reason';
+    return String(reason);
   }
   function showCallFailureAndEnd(message){
     trace('FAILURE: ' + message);
@@ -4159,11 +4164,22 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         // blocking dialog freezes the page (audio, video and the media socket all stall), which made the
         // callee see buffering and the call drop with "browser_media_failed". This call is an avatar
         // video call, so just switch to video, once.
-        if (!WaCallsMediaLeg.active || WaCallsMediaLeg.video || WaCallsMediaLeg.upgrading) return;
+        // The request MUST be accepted (POST video/accept) even when our leg is already sending video:
+        // WhatsApp retries a few times and then the callee's phone gives up and ENDS the call, which
+        // is the "hangs up by itself a few seconds after connecting" bug. Accepting is idempotent
+        // server-side, so every request is answered, at most one at a time.
+        if (!WaCallsMediaLeg.active || WaCallsMediaLeg.upgrading) return;
         WaCallsMediaLeg.upgrading = true;
-        WaCallsMediaLeg.upgradeToVideo()
-          .then(() => console.log('[WaCalls] call upgraded to video'))
-          .catch((e) => console.warn('[WaCalls] video upgrade failed:', e.message))
+        (async () => {
+          if (!WaCallsMediaLeg.video) await WaCallsMediaLeg.upgradeToVideo();
+          const r = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/wacalls/video/accept', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callId: WaCallsMediaLeg.callId }),
+          });
+          trace('video: accepted the callee\'s video request' + (r.ok ? '' : ' (HTTP ' + r.status + ')'));
+          if (WaCallsMediaLeg.video) WaCallsMediaLeg.keyframeBurst();
+        })()
+          .catch((e) => { console.warn('[WaCalls] video accept failed:', e.message); trace('video: accept failed - ' + e.message); })
           .finally(() => { WaCallsMediaLeg.upgrading = false; });
         return;
       }
@@ -4220,7 +4236,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         else if (status === 'timeout') showCallFailureAndEnd('No answer');
         else {
           // The other side (or the network) ended it while the call screen was up - say so.
-          if ($('socialCallScreen')?.classList.contains('active')) noteEndReason('Call ended: ' + endReasonText((msg.call && msg.call.reason) || lastRemoteEndReason || 'ended'));
+          if ($('socialCallScreen')?.classList.contains('active')) noteEndReason('Call ended: ' + endReasonText((msg.call && msg.call.reason) || lastRemoteEndReason || ''));
           endSocialCall();
         }
       }
@@ -4247,7 +4263,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         // The call screen is still up, so this was NOT the End button: the other side
         // (or the network) ended it. Record why, so the banner can say so.
         if ($('socialCallScreen')?.classList.contains('active')) {
-          noteEndReason('Call ended: ' + endReasonText(lastRemoteEndReason || 'ended'));
+          noteEndReason('Call ended: ' + endReasonText(lastRemoteEndReason || ''));
         }
         endSocialCall();
       }
