@@ -707,11 +707,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     renderChatThread();
 
     try {
-      const r = await fetch('/api/chat-respond', {
+      // A call request waits at most 5s for the assistant; the call then goes out regardless.
+      const req = fetch('/api/chat-respond', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: chatMessages.slice(0, -1).map(m => ({ role: m.role, content: m.content })) }),
       });
+      const r = wantsCall ? await Promise.race([req, new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), 5000))]) : await req;
       const data = await r.json();
       chatMessages[thinkingIdx] = { role: 'assistant', content: r.ok ? data.reply : ('Error: ' + JSON.stringify(data.error)) };
       renderChatThread();
@@ -4164,11 +4166,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
         // blocking dialog freezes the page (audio, video and the media socket all stall), which made the
         // callee see buffering and the call drop with "browser_media_failed". This call is an avatar
         // video call, so just switch to video, once.
-        // The request MUST be accepted (POST video/accept) even when our leg is already sending video:
-        // WhatsApp retries a few times and then the callee's phone gives up and ENDS the call, which
-        // is the "hangs up by itself a few seconds after connecting" bug. Accepting is idempotent
-        // server-side, so every request is answered, at most one at a time.
-        if (!WaCallsMediaLeg.active || WaCallsMediaLeg.upgrading) return;
+        // Only a real UPGRADE request needs an answer. Every other video message is just the callee's camera
+        // state. Never touch video/start or video/accept for those: on a call that is already video they
+        // gate the avatar's own picture and send the callee a fake upgrade request (the callee then sits
+        // on "Connecting").
+        trace('peer video message (upgrade=' + !!evt.upgrade + ', camera=' + !!evt.active + ')');
+        if (!evt.upgrade || !WaCallsMediaLeg.active || WaCallsMediaLeg.upgrading) return;
         WaCallsMediaLeg.upgrading = true;
         (async () => {
           if (!WaCallsMediaLeg.video) await WaCallsMediaLeg.upgradeToVideo();
@@ -4176,10 +4179,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ callId: WaCallsMediaLeg.callId }),
           });
-          trace('video: accepted the callee\'s video request' + (r.ok ? '' : ' (HTTP ' + r.status + ')'));
-          if (WaCallsMediaLeg.video) WaCallsMediaLeg.keyframeBurst();
+          trace('video: accepted the callee\'s upgrade request' + (r.ok ? '' : ' (HTTP ' + r.status + ')'));
         })()
-          .catch((e) => { console.warn('[WaCalls] video accept failed:', e.message); trace('video: accept failed - ' + e.message); })
+          .catch((e) => { trace('video: accept failed - ' + e.message); })
           .finally(() => { WaCallsMediaLeg.upgrading = false; });
         return;
       }

@@ -619,7 +619,7 @@ export function normaliseEvent(raw) {
     case 'call-unheld':
       return { kind: 'media-ready', subtype: 'unheld', callId, sessionId: raw.sessionId };
     case 'call-peer-video':
-      return { kind: 'video-request', subtype: 'peer-video', callId, sessionId: raw.sessionId, upgrade: !!raw.upgrade };
+      return { kind: 'video-request', subtype: 'peer-video', callId, sessionId: raw.sessionId, upgrade: !!raw.upgrade, active: !!raw.active };
     case 'call-reaction':
       return { kind: 'session', subtype: 'reaction', callId, text: raw.text || '' };
     case 'call-hand':

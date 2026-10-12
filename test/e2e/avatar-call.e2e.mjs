@@ -83,8 +83,9 @@ const waSrv = http.createServer(async (req, res) => {
     // (several times in a row) and GIVES UP - ends the call - if nobody accepts.
     if (cfg.peerVideoAfterMs) setTimeout(() => {
       if (c.ended) return; wa.accepted = 0;
-      for (let i = 0; i < 2; i++) setTimeout(() => waEmit('call-peer-video', { id: c.id, active: true, upgrade: true }), i * 100);
-      setTimeout(() => { if (c.ended || wa.accepted) return; c.ended = true; waEmit('call-ended', { id: c.id, reason: 'ended' }); }, 2500);
+      const up = cfg.peerVideoUpgrade !== false;
+      for (let i = 0; i < 2; i++) setTimeout(() => waEmit('call-peer-video', { id: c.id, active: true, upgrade: up }), i * 100);
+      if (up) setTimeout(() => { if (c.ended || wa.accepted) return; c.ended = true; waEmit('call-ended', { id: c.id, reason: 'ended' }); }, 2500);
     }, (cfg.answerAfterMs ?? 2500) + cfg.peerVideoAfterMs);
     return jsonOut(res, 200, { call: { callId: c.id } });
   }
@@ -114,7 +115,7 @@ function startServer() {
 
 async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = 'user', holdMs = 12000, avcc = false, testMode = false, chatMode = false } = {}) {
   console.log(`\n=== ${name}`);
-  wa.calls = []; wa.events = []; wa.hangups = 0; wa.cfg = wacalls; wa.callPostAt = 0; wa.connectedAt = 0;
+  wa.calls = []; wa.events = []; wa.reqs = []; wa.hangups = 0; wa.cfg = wacalls; wa.callPostAt = 0; wa.connectedAt = 0;
   calleePage = await browser.newPage(); await calleePage.goto(`http://127.0.0.1:${APP_PORT}/__callee.html`);
   const page = await browser.newPage(); await page.setBypassServiceWorker(true);
   const R = { chatRespondAt: 0, chat: {}, summaryPosts: [], pageErrors: [], consoleErrors: [], stopActive: 0, anamPosts: [], mic: 0 };
@@ -293,6 +294,7 @@ const scenarios = {
   declined: ['S6 callee declines the call', { wacalls: { declineAfterMs: 2500 }, holdMs: 3000 }],
   dead: ['S3 Anam is unavailable (every attempt fails)', { anam: { failAttempts: [1, 2, 3, 4, 5, 6] } }],
   chat: ['S11 chat box: Enter is a new line, Send replies first and only then places the call', { chatMode: true, holdMs: 7000 }],
+  camstate: ['S12 callee camera-state messages (not an upgrade): the app must NOT touch video/start or video/accept (that gates the avatar picture)', { wacalls: { peerVideoAfterMs: 3000, peerVideoUpgrade: false }, holdMs: 10000 }],
   peervideo: ['S10 callee taps the camera button (peer video request): the app must accept it and the call must stay up', { wacalls: { peerVideoAfterMs: 4000 }, holdMs: 12000 }],
   slow: ['S4 avatar takes 25s to start; callee answers in 3s', { anam: { startDelayMs: 25000 }, wacalls: { answerAfterMs: 3000 }, holdMs: 8000 }],
 };
@@ -365,6 +367,11 @@ try {
       check(r.chat.callsDuringReply === 0, 'no call is placed before the assistant has replied', JSON.stringify(r.chat));
       check(r.chatRespondAt && r.callPostAt >= r.chatRespondAt, 'the call is placed after the reply', `reply ${r.chatRespondAt}, dial ${r.callPostAt}`);
       check(r.callsPlaced === 1, 'exactly one call placed from the chat message', String(r.callsPlaced));
+    }
+    if (key === 'camstate') {
+      const bad = wa.reqs.filter((q) => /\/video\/(start|accept)$/.test(q));
+      check(bad.length === 0, 'no video/start or video/accept sent for plain camera-state messages', JSON.stringify(bad));
+      check(r.survived && r.callee.bright > 5, 'call stays up and the callee keeps seeing the avatar');
     }
     if (key === 'peervideo') {
       check(wa.accepted >= 1, 'the peer video request was accepted (POST video/accept)', 'accepts: ' + wa.accepted);

@@ -621,6 +621,8 @@ function handleWacallsEvent(evt) {
     reason: evt.reason || null,
     direction: evt.direction || null,
     error: evt.error || null,
+    upgrade: !!evt.upgrade,
+    active: !!evt.active,
   };
 
   if (evt.kind === 'incoming' && evt.callId) {
@@ -659,6 +661,7 @@ function handleWacallsEvent(evt) {
     broadcastMediaEvent({ type: 'wa_call_event', call: { id: evt.callId, status: 'accept' } });
   } else if (evt.kind === 'ended') {
     console.log(`[WaCalls] call ended: callId=${evt.callId || 'unknown'} reason=${evt.reason || 'unknown'}`);
+    broadcastMediaEvent(payload); // first: it carries the real reason, the two below close the call screen
     broadcastMediaEvent({ type: 'wa_call_event', call: { id: evt.callId, status: 'terminate', reason: evt.reason } });
     broadcastMediaEvent({ type: 'call_state', state: 'ended', call: activeCall.v });
     // An incoming call that ended without ever being answered has no browser
