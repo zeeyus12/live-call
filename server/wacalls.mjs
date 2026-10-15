@@ -410,6 +410,13 @@ export async function videoStop(callId) {
   return r.data;
 }
 
+// The call server's own recent log lines for a call (relay, signalling, end reason). Best effort.
+export async function debugLog(sinceMs, callId) {
+  const r = await apiFetch(`/api/debug/log?since=${Math.max(0, Math.floor(sinceMs))}&call=${encodeURIComponent(callId || '')}&limit=120`, { timeoutMs: 5000 });
+  if (!r.ok) throw new Error(`WaCalls debug log failed (HTTP ${r.status})`);
+  return Array.isArray(r.data?.lines) ? r.data.lines : [];
+}
+
 // Accepts a video upgrade the PEER asked for (never called automatically).
 export async function videoAccept(callId) {
   const sessionId = await resolveSession();
@@ -810,6 +817,7 @@ export const wacalls = {
   videoStart,
   videoStop,
   videoAccept,
+  debugLog,
   probeVideoSupport,
   videoSupportState,
   noteCallMedia,

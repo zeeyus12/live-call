@@ -71,6 +71,7 @@ const waSrv = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.write(`data: ${JSON.stringify({ type: 'session-list', sessions: sess })}\n\n`);
     const t = setInterval(() => { const n = wa.events.shift(); if (n) try { res.write(n); } catch (e) {} }, 20); req.on('close', () => clearInterval(t)); return;
   }
+  if (p === '/api/debug/log') return jsonOut(res, 200, { lines: [{ t: Date.now(), line: '15:04:05.000 ERR relay connect timed out call_id=call-1' }] });
   if (p === '/api/sessions') return jsonOut(res, 200, { sessions: sess });
   if (/\/calls$/.test(p) && req.method === 'GET') return jsonOut(res, 200, { active: wa.calls.filter((c) => !c.ended).length, maxCallsPerSession: 8 });
   if (/\/calls$/.test(p) && req.method === 'POST') {
@@ -206,7 +207,7 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
     screen: document.getElementById('socialCallScreen')?.classList.contains('active') || false,
     label: document.getElementById('socialCallStatusLabel')?.textContent || '',
     prepErr: document.getElementById('prepErrorHint')?.textContent || '',
-    toast: document.getElementById('callEndToast')?.style.display === 'block' ? document.getElementById('callEndToast').innerText.slice(0, 400) : '',
+    toast: document.getElementById('callEndToast')?.style.display === 'block' ? document.getElementById('callEndToast').innerText.slice(0, 3000) : '',
   }));
   let answeredAt = null, endedAt = null, layout = null;
   while (Date.now() - t0 < holdMs + 20000) {
@@ -231,18 +232,19 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
   const anamLog = await safe('anam log', () => page.evaluate(() => ({ ...window.__anamLog, attempts: window.__anamLog.attempts.map((a) => ({ n: a.n, t: a.t, userAudio: a.userAudio })) })), { attempts: [], maxLive: 0, rejected: 0, live: -1 });
   const gum = await safe('gum', () => page.evaluate(() => window.__gum), -1);
   const finalUi = await status().catch(() => ({}));
-  let toastAfter = '';
+  let toastAfter = '', toastLate = '';
   if (survived && finalUi.screen) {
     if (endMode === 'remote') { waEmit('call-ended', { id: 'call-1', reason: 'remote_ended' }); }
     else { await page.evaluate(() => document.getElementById('socialEndBtn').click()); }
     for (let i = 0; i < 40; i++) { await sleep(250); const s2 = await status().catch(() => ({})); if (!s2.screen) { toastAfter = s2.toast || ''; break; } }
     await sleep(3000); // give any cleanup time to finish
+    toastLate = (await status().catch(() => ({}))).toast || '';
   }
   const liveAfter = await page.evaluate(() => window.__anamLog.live).catch(() => -1);
   if (process.env.E2E_VERBOSE) console.log('   ws messages:', (await page.evaluate(() => window.__wslog.slice(-8))).join('\n      '));
   if (process.env.E2E_VERBOSE) console.log('   toast dom:', await page.evaluate(() => { const t = document.getElementById('callEndToast'); return t ? t.style.display + ' | ' + t.innerText.slice(0, 120).replace(/\n/g, ' / ') : 'none'; }));
   const calls = wa.calls.length;
-  const res = { name, chat: R.chat, chatRespondAt: R.chatRespondAt, layout, liveAfter, connectedAt: wa.connectedAt, callPostAt: wa.callPostAt, toastAfter, survived, answered: !!answeredAt, callee, anamLog, gum, calls, summaryPosts: R.summaryPosts, pageErrors: R.pageErrors, finalUi, timeline, callsPlaced: calls, stopActive: R.stopActive };
+  const res = { name, chat: R.chat, chatRespondAt: R.chatRespondAt, layout, liveAfter, connectedAt: wa.connectedAt, callPostAt: wa.callPostAt, toastAfter, toastLate, survived, answered: !!answeredAt, callee, anamLog, gum, calls, summaryPosts: R.summaryPosts, pageErrors: R.pageErrors, finalUi, timeline, callsPlaced: calls, stopActive: R.stopActive };
   await page.close(); await calleePage.close();
   return res;
 }
@@ -352,6 +354,7 @@ try {
     if (key === 'remote') {
       check(r.liveAfter === 0, 'Anam session is released when the callee hangs up (no leak)', 'still live: ' + r.liveAfter);
       check(/hung up|ended/i.test(r.toastAfter), 'screen says why the call ended', JSON.stringify(r.toastAfter).slice(0, 200));
+      check(/call server:/.test(r.toastLate) && /relay connect timed out/.test(r.toastLate), 'the banner also shows what the call server logged for the call', JSON.stringify(r.toastLate).slice(0, 300));
       check(r.summaryPosts.length === 1 && r.summaryPosts[0].answered === true, 'a summary is requested when the callee hangs up', String(r.summaryPosts.length));
     }
     if (key === 'declined') {

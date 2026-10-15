@@ -550,6 +550,7 @@ function closeTgCallsPipes() {
 // API key out of the page while the media path stays browser <-> WaCalls.
 // ---------------------------------------------------------------
 const wacallsPolls = new Map(); // userId -> interval
+const lastWaCalls = new Map();  // userId -> { callId, startedAt } of their most recent WaCalls call (for the debug view)
 
 function startWacallsStatePoll() {
   stopWacallsStatePoll();
@@ -891,6 +892,17 @@ const server = http.createServer(async (req, res) => {
     // with the `qrcode` dependency this project already ships - the same
     // approach the previous engine's /qr route used, so the Profile screen
     // needs no change to display it.
+    // The call server's own log for THIS user's most recent call (relay, signalling, why it ended).
+    if (subpath === 'wacalls/debug' && req.method === 'GET') {
+      const last = lastWaCalls.get(currentUserId() || '_none');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      if (!last) return res.end(JSON.stringify({ lines: [] }));
+      try {
+        const lines = await wacalls.debugLog(last.startedAt - 3000, last.callId);
+        return res.end(JSON.stringify({ lines: lines.map((l) => `${(((l.t || 0) - last.startedAt) / 1000).toFixed(1)}s ${String(l.line || '').replace(/^\S+\s+/, '').slice(0, 200)}`) }));
+      } catch (e) { return res.end(JSON.stringify({ lines: [], error: e.message })); }
+    }
+
     if (subpath === 'wacalls/qr' && (req.method === 'GET' || req.method === 'POST')) {
       const status = await wacalls.publicStatus({});
       if (!status.configured) {
@@ -1216,6 +1228,7 @@ const server = http.createServer(async (req, res) => {
           const wantVideo = video !== false;
           const r = await wacalls.startCall({ target, video: wantVideo, name: name || target });
           activeCall.v.callId = r.callId;
+          lastWaCalls.set(currentUserId() || '_none', { callId: r.callId, startedAt: activeCall.v.startedAt });
           activeCall.v.sessionId = r.sessionId;
           activeCall.v.videoRequested = wantVideo;
           activeCall.v.avatarSource = source === 'anam' ? 'anam' : 'lucy';

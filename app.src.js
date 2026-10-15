@@ -3825,7 +3825,21 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // Timeline of the call ("2.1s avatar: ready"), kept in memory and shown under the
   // end-of-call banner, so one screenshot says what happened and when.
   const callTrace = []; let callTraceT0 = Date.now();
-  function resetTrace(){ callTrace.length = 0; callTraceT0 = Date.now(); }
+  const callSrvLines = []; // what the call server itself logged during the call (fetched after it ends)
+  function resetTrace(){ callTrace.length = 0; callSrvLines.length = 0; callTraceT0 = Date.now(); }
+  async function pullServerLog(){
+    try {
+      const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 6000);
+      const r = await fetch(SOCIAL_CALL_API_BASE + '/api/social-call/wacalls/debug', { signal: ctl.signal, headers: await authHeader() });
+      clearTimeout(tm);
+      const d = await r.json().catch(() => ({}));
+      callSrvLines.length = 0;
+      (d.lines || []).slice(-60).forEach((l) => callSrvLines.push(String(l).slice(0, 190)));
+      if (!callSrvLines.length) callSrvLines.push(d.error ? ('(call server log unavailable: ' + d.error + ')') : '(call server logged nothing for this call)');
+      const t = $('callEndToast');
+      if (t && t.style.display === 'block' && t._text) showEndToast(t._text);
+    } catch (e) { callSrvLines.push('(call server log unavailable: ' + (e.message || e) + ')'); }
+  }
   function trace(msg){
     callTrace.push(((Date.now() - callTraceT0) / 1000).toFixed(1) + 's ' + String(msg).slice(0, 140));
     if (callTrace.length > 60) callTrace.shift();
@@ -3840,6 +3854,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       t.addEventListener('click', () => { t.style.display = 'none'; });
       document.body.appendChild(t);
     }
+    t._text = text;
     t.textContent = '';
     const head = document.createElement('div');
     head.textContent = text;
@@ -3849,12 +3864,18 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       pre.style.cssText = 'margin-top:8px; font:11px/1.45 ui-monospace,Menlo,monospace; color:#e8b8b2; white-space:pre-wrap; word-break:break-word;';
       pre.textContent = callTrace.slice(-14).join('\n');
       t.appendChild(pre);
+      if (callSrvLines.length) {
+        const srv = document.createElement('div');
+        srv.style.cssText = 'margin-top:8px; font:10.5px/1.4 ui-monospace,Menlo,monospace; color:#d9a8a2; white-space:pre-wrap; word-break:break-word; max-height:180px; overflow:auto;';
+        srv.textContent = 'call server:\n' + callSrvLines.slice(-14).join('\n');
+        t.appendChild(srv);
+      }
       const copy = document.createElement('button');
       copy.textContent = 'Copy details';
       copy.style.cssText = 'margin-top:8px; padding:6px 12px; border-radius:10px; border:1px solid #7a2a2a; background:#3a1a1c; color:#ffd0ca; font-size:12px;';
       copy.addEventListener('click', (e) => {
         e.stopPropagation();
-        const all = text + '\n' + callTrace.join('\n');
+        const all = text + '\n' + callTrace.join('\n') + (callSrvLines.length ? '\n--- call server ---\n' + callSrvLines.join('\n') : '');
         try { navigator.clipboard.writeText(all); copy.textContent = 'Copied'; } catch(_) { copy.textContent = 'Copy failed'; }
       });
       t.appendChild(copy);
@@ -5929,7 +5950,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     trace('call screen closed');
     resetAvatarGate(false);
     const waSummaryJob = captureWaAvatarCallForSummary();
-    if (lastEndReason) { showEndToast(lastEndReason); lastEndReason = ''; }
+    if (lastEndReason) { showEndToast(lastEndReason); lastEndReason = ''; if (currentCallEngine === 'wacalls') pullServerLog(); }
     if (waSummaryJob) sendWaCallSummary(waSummaryJob); // fire-and-forget: the push is what reaches you
     clearInterval(socialCallDurationTimer); socialCallDurationTimer = null;
     stopRingback();
