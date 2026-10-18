@@ -3890,7 +3890,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     if (r === 'declined' || r === 'reject' || r === 'rejected') return 'the other person declined';
     if (r === 'busy') return 'the other person is busy';
     if (r === 'timeout' || r === 'no_answer' || r === 'unanswered') return 'nobody answered';
-    if (r === 'user_ended' || r === 'remote_ended' || r === 'hangup') return 'the other side hung up';
+    if (r === 'user_ended' || r === 'remote_ended' || r === 'remote_hangup' || r === 'hangup') return 'the other side hung up';
     if (r === 'ended' || r === '') return 'the call was closed and WhatsApp gave no reason';
     return String(reason);
   }
