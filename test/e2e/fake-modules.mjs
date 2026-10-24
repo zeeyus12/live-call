@@ -66,7 +66,7 @@ export function createClient() {
 export const FAKE_ANAM = `
 export const AnamEvent = {
   VIDEO_PLAY_STARTED: 'VIDEO_PLAY_STARTED', CONNECTION_CLOSED: 'CONNECTION_CLOSED', SERVER_WARNING: 'SERVER_WARNING',
-  MESSAGE_HISTORY_UPDATED: 'MESSAGE_HISTORY_UPDATED', SESSION_READY: 'SESSION_READY', MESSAGE_STREAM_EVENT_RECEIVED: 'MESSAGE_STREAM_EVENT_RECEIVED',
+  MESSAGE_HISTORY_UPDATED: 'MESSAGE_HISTORY_UPDATED', SESSION_READY: 'SESSION_READY', AUDIO_STREAM_STARTED: 'AUDIO_STREAM_STARTED', MESSAGE_STREAM_EVENT_RECEIVED: 'MESSAGE_STREAM_EVENT_RECEIVED',
 };
 const W = window;
 const L = W.__anamLog = W.__anamLog || { attempts: [], live: 0, maxLive: 0, started: 0, stopped: 0, rejected: 0, muteLog: [], msgs: [] };
@@ -99,9 +99,11 @@ export function createClient(token) {
       draw();
       const ac = new (W.AudioContext || W.webkitAudioContext)(); const dest = ac.createMediaStreamDestination();
       const osc = ac.createOscillator(); osc.frequency.value = 440; const g = ac.createGain(); g.gain.value = 0; gainNode = g; osc.connect(g).connect(dest); osc.start(); // silent until it is told the call is connected, like the real persona
+      // Like the real SDK: the element gets the VIDEO only; the voice is a separate stream announced by an event.
       stream = new MediaStream([...c.captureStream(15).getVideoTracks(), ...dest.stream.getAudioTracks()]);
-      const el = document.getElementById(elementId); el.srcObject = stream; el.muted = true;
+      const el = document.getElementById(elementId); el.srcObject = new MediaStream(stream.getVideoTracks()); el.muted = true;
       try { await el.play(); } catch (e) {}
+      emit(AnamEvent.AUDIO_STREAM_STARTED, new MediaStream(dest.stream.getAudioTracks()));
       emit(AnamEvent.VIDEO_PLAY_STARTED); emit(AnamEvent.SESSION_READY);
       setTimeout(() => emit(AnamEvent.MESSAGE_HISTORY_UPDATED, [
         { id: 'm1', role: 'persona', content: 'Hello Chris, it is Alice\\'s assistant. How are you today?' },

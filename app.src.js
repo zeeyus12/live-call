@@ -2309,7 +2309,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     isActive(){ return !!this.client; },
     // The avatar's own voice (audio track of the stream Anam plays into the
     // preview element) - what the callee has to hear.
+    // The real SDK does NOT put the avatar's voice on the video element: its video stream is video-only
+    // and the voice arrives as its own audio stream (AUDIO_STREAM_STARTED). Reading only the element
+    // left the callee with silence for the whole call. Use the event's stream, falling back to the element.
+    avatarAudioStream: null,
     getAudioStream(){
+      const own = this.avatarAudioStream && this.avatarAudioStream.getAudioTracks ? this.avatarAudioStream.getAudioTracks() : [];
+      if (own.length) return new MediaStream(own);
       const so = this.videoEl && this.videoEl.srcObject;
       const tracks = so && so.getAudioTracks ? so.getAudioTracks() : [];
       return tracks.length ? new MediaStream(tracks) : null;
@@ -2337,6 +2343,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const { createClient, AnamEvent } = sdk;
       const client = createClient(data.sessionToken);
       this.client = client;
+      this.avatarAudioStream = null;
+      try {
+        if (AnamEvent.AUDIO_STREAM_STARTED) client.addListener(AnamEvent.AUDIO_STREAM_STARTED, (s) => { this.avatarAudioStream = s || null; trace('avatar: voice stream ready'); });
+      } catch (_) {}
       // During a call the avatar's voice goes to the callee over the call; it
       // is not also played out loud here.
       vid.muted = !!calleeStream;
