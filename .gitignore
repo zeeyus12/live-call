@@ -19,3 +19,8 @@ server/voicechanger/*.index
 
 
 pylibs/
+
+# Secrets: API keys live in .env only, never in code or commits
+.env
+.env.*
+!.env.example
