@@ -358,7 +358,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     anamKeySet: false,
     anamKeyLocked: false,
     falKeySet: false,
-    decartKeySet: false,
+    xmaxKeySet: false,
   };
   let currentUser = null;
   let currentChatId = null;
@@ -395,7 +395,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       if (!r.ok) return;
       state.anamKeySet = !!data.anam;
       state.falKeySet = !!data.fal;
-      state.decartKeySet = !!data.decart;
+      state.xmaxKeySet = !!data.xmax;
       state.anamKeyLocked = !!data.anamKeyLocked;
     } catch (e) { /* leave as false - UI just shows "paste your key" */ }
     if (state.anamKeyLocked) {
@@ -408,7 +408,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       $('saveAnamKey').disabled = false;
     }
     $('falApiKey').placeholder = state.falKeySet ? 'Key saved — enter a new one to replace' : 'Paste your Fal API key';
-    $('decartApiKey').placeholder = state.decartKeySet ? 'Key saved — enter a new one to replace' : 'Paste your Decart API key';
+    $('xmaxApiKey').placeholder = state.xmaxKeySet ? 'Key saved — enter a new one to replace' : 'Paste your Xmax API key';
     const lps = $('lucyProviderSelect'); if (lps) lps.value = lucyProvider();
   }
 
@@ -594,7 +594,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     loadAnamAvatars(); loadAnamVoices();
   }));
   $('saveFalKey')?.addEventListener('click', () => saveProviderKey('fal', 'falApiKey', 'saveFalKey', () => updateLfKeyHint()));
-  $('saveDecartKey')?.addEventListener('click', () => saveProviderKey('decart', 'decartApiKey', 'saveDecartKey', () => updateLfKeyHint()));
+  $('saveXmaxKey')?.addEventListener('click', () => saveProviderKey('xmax', 'xmaxApiKey', 'saveXmaxKey', () => updateLfKeyHint()));
   $('lucyProviderSelect')?.addEventListener('change', (e) => { try { localStorage.setItem('lucyProvider', e.target.value); } catch(_){} updateLfKeyHint(); });
   $('saveGreenapiKey')?.addEventListener('click', () => saveProviderKey('greenapi', 'greenapiApiKey', 'saveGreenapiKey'));
   document.querySelectorAll('.eyeToggle').forEach(btn => {
@@ -1487,7 +1487,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   function lfFriendlyError(raw){
     const s = String(raw || '').toLowerCase();
     if (s.includes('concurrency') || s.includes('concurrent')) return 'Another live session is still open on your account (your plan allows only one at a time). Close it or wait a minute, then try again.';
-    if (s.includes('credit') || s.includes('balance') || s.includes('quota') || s.includes('402') || s.includes('payment')) return 'Your Decart account is out of credits. Top up at platform.decart.ai, then try again.';
+    if (s.includes('credit') || s.includes('balance') || s.includes('quota') || s.includes('402') || s.includes('payment')) return 'Your Xmax account is out of credits. Top up at platform.xmax.ai, then try again.';
     if (s.includes('429') || s.includes('rate limit') || s.includes('too many')) return 'Too many sessions at once — wait a moment and try again.';
     if (s.includes('capacity') || s.includes('busy')) return 'Servers are busy right now — please try again in a moment.';
     if (s.includes('token') || s.includes('key') || s.includes('401') || s.includes('unauthorized')) return 'We couldn\u2019t verify your account. Check your API key in Profile \u2192 API.';
@@ -1527,13 +1527,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   function lucyProvider(){
     let pref = 'fal';
     try { pref = localStorage.getItem('lucyProvider') || 'fal'; } catch(_){}
-    if (pref === 'decart' && state.decartKeySet) return 'decart';
+    if (pref === 'xmax' && state.xmaxKeySet) return 'xmax';
     if (pref === 'fal' && state.falKeySet) return 'fal';
     if (state.falKeySet) return 'fal';
-    if (state.decartKeySet) return 'decart';
-    return pref === 'decart' ? 'decart' : 'fal';
+    if (state.xmaxKeySet) return 'xmax';
+    return pref === 'xmax' ? 'xmax' : 'fal';
   }
-  const lucyKeySet = () => state.falKeySet || state.decartKeySet;
+  const lucyKeySet = () => state.falKeySet || state.xmaxKeySet;
   function updateLfKeyHint(){
     $('lfKeyHint').style.display = lucyKeySet() ? 'none' : 'block';
     $('lfStartBtn').disabled = !lucyKeySet();
@@ -1565,10 +1565,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       for (const el of [$('lfImageStatus'), statusEl]) { if (el && el !== statusEl) el.textContent = 'Reference photo ready'; }
 
       // Auto-describe the photo so the person never has to type a prompt -
-      // Decart's docs say resemblance is weak without a literal description
+      // Lucy's docs say resemblance is weak without a literal description
       // of the reference in the prompt text, so we build that automatically.
-      if (lucyProvider() === 'decart') {
-        // Decart takes the reference photo itself; the text description is only
+      if (lucyProvider() === 'xmax') {
+        // Xmax takes the reference photo itself; the text description is only
         // used by the Fal path, so don't make an extra call that can only fail.
         statusEl.textContent = 'Reference photo ready';
         return;
@@ -1813,81 +1813,76 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     return token;
   }
 
-  // ---- Decart native realtime (lucy-latest). Uses a short-lived client token minted by
-  // /api/fal-realtime-token {provider:'decart'} from the user's OWN Decart key.
-  let lfDecart = null;
-  async function startDecartLive(prompt){
+  // ---- Xmax realtime face swap (X2.1). Same job as Lucy 2.5: your camera in, the reference person out.
+  // The browser only ever holds a TEMPORARY key (tk-...) minted by /api/fal-realtime-token {provider:'xmax'}.
+  let lfXmax = null; // { realtime, tk } while a session is up
+  // Shared output path for any provider that returns a remote MediaStream.
+  function deliverLiveRemote(stream){
+    lfRemoteVideo.srcObject = stream;
+    LiveSwapMediaSource.setStream(stream);
+    const socialVid = $('socialRemoteVideo');
+    if (socialVid) { socialVid.srcObject = stream; socialVid.style.display = 'block'; }
+    const prepVid = $('prepAvatarPreview');
+    if (prepVid) {
+      prepVid.srcObject = stream;
+      prepVid.style.display = 'block';
+      const ph = $('prepAvatarPlaceholder'); if (ph) ph.style.display = 'none';
+    }
+    if (!LiveSwapMediaSource.forSocialCall) {
+      lfRemoteVideo.style.display = 'block';
+      lfIdle.style.display = 'none';
+      lfLiveDot.classList.add('live');
+      lfBottom.classList.remove('hidden');
+    } else {
+      const idle = $('socialCallIdle'); if (idle) idle.style.display = 'none';
+      const lucySt = $('prepLucyStatus'); if (lucySt) lucySt.textContent = 'Live & Streaming';
+      $('prepLucyDot')?.classList.add('live');
+    }
+  }
+  async function startXmaxLive(prompt){
     try {
+      if (!lfReferenceImageUrl) throw new Error('Pick a reference photo first');
       lfStatus.textContent = 'Connecting…';
       const tr = await fetch('/api/fal-realtime-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
-        body: JSON.stringify({ provider: 'decart' }),
+        body: JSON.stringify({ provider: 'xmax' }),
       });
       const tk = await tr.json().catch(() => ({}));
-      if (!tr.ok || !tk.apiKey) throw new Error(tk.error || `Decart token request failed (${tr.status})`);
+      if (!tr.ok || !tk.temporaryApiKey) throw new Error(tk.error || `Xmax token request failed (${tr.status})`);
 
-      const { createDecartClient, models } = await import('https://esm.sh/@decartai/sdk@0.2.4');
-      const model = models.realtime('lucy-latest');
-      // Use the model's own fps/size so Decart doesn't have to rescale.
+      // Pinned SDK: 1.0.10 (published 17 Oct, at least two weeks old).
+      const X = await import('https://esm.sh/@xmaxai/web-sdk@1.0.10');
+      // Xmax opens its own camera capture; release the preview capture so the two don't fight.
       if (lfLocalStream) { lfLocalStream.getTracks().forEach(t => t.stop()); lfLocalStream = null; }
-      lfLocalStream = await navigator.mediaDevices.getUserMedia({
-        // model.fps is already a constraint object ({ ideal: 30, max: 30 }) in the
-        // Decart SDK - wrapping it again made the browser reject the request with
-        // "The provided value is non-finite". Accept either shape.
-        video: {
-          facingMode: 'user',
-          frameRate: (typeof model.fps === 'number') ? { ideal: model.fps } : (model.fps || { ideal: 30 }),
-          width: { ideal: Number(model.width) || 1088 },
-          height: { ideal: Number(model.height) || 624 },
-        },
+      const client = new X.XmaxClient(new X.XmaxConfiguration({ apiKey: tk.temporaryApiKey, environment: X.XmaxEnvironment.global }));
+      const realtime = client.createRealtimeManager(new X.RealtimeConfiguration({ model: X.RealtimeModel.x2_1 }));
+      lfStatus.textContent = 'Starting camera…';
+      const localStream = await realtime.createLocalCameraStream({
+        videoFormat: new X.RealtimeVideoFormat({ width: 720, height: 1280, fps: 15 }),
+        position: X.CameraPosition.front,
+        useMicrophone: false,
       });
-      const selfVid = $('socialSelfVideo');
-      if (selfVid) selfVid.srcObject = lfLocalStream;
-
-      const hasRef = !!lfReferenceImageUrl;
-      const initialState = {};
-      if (hasRef) {
-        initialState.image = lfReferenceImageUrl;
-        initialState.prompt = { text: 'Substitute the character in the video with the person in the reference image.', enhance: false };
-      } else if (prompt) {
-        initialState.prompt = { text: prompt, enhance: true };
+      lfXmax = { realtime, tk: tk.temporaryApiKey };
+      const selfTrack = localStream.videoTrack && localStream.videoTrack.mediaStreamTrack;
+      if (selfTrack) {
+        lfLocalStream = new MediaStream([selfTrack]);
+        const selfVid = $('socialSelfVideo'); if (selfVid) selfVid.srcObject = lfLocalStream;
       }
-
-      const client = createDecartClient({ apiKey: tk.apiKey });
       lfStatus.textContent = 'Opening connection…';
-      lfDecart = await client.realtime.connect(lfLocalStream, {
-        model,
-        onRemoteStream: (stream) => {
-          lfRemoteVideo.srcObject = stream;
-          LiveSwapMediaSource.setStream(stream);
-          const socialVid = $('socialRemoteVideo');
-          if (socialVid) { socialVid.srcObject = stream; socialVid.style.display = 'block'; }
-          const prepVid = $('prepAvatarPreview');
-          if (prepVid) {
-            prepVid.srcObject = stream;
-            prepVid.style.display = 'block';
-            const ph = $('prepAvatarPlaceholder'); if (ph) ph.style.display = 'none';
-          }
-          if (!LiveSwapMediaSource.forSocialCall) {
-            lfRemoteVideo.style.display = 'block';
-            lfIdle.style.display = 'none';
-            lfLiveDot.classList.add('live');
-            lfBottom.classList.remove('hidden');
-          } else {
-            const idle = $('socialCallIdle'); if (idle) idle.style.display = 'none';
-            const lucySt = $('prepLucyStatus'); if (lucySt) lucySt.textContent = 'Live & Streaming';
-            $('prepLucyDot')?.classList.add('live');
-          }
-        },
-        initialState: Object.keys(initialState).length ? initialState : undefined,
+      const remote = await realtime.startGeneration({
+        localStream,
+        context: new X.RealtimeContext({
+          prompt: 'Substitute the character in the video with the person in the reference image.',
+          referencePath: lfReferenceImageUrl,
+        }),
       });
-      if (typeof lfDecart.on === 'function') {
-        try { lfDecart.on('error', (e) => { lfDebug('decart error: ' + (e && e.message || e)); lfShowError((e && e.message) || 'Decart error'); }); } catch(_){}
-      }
-      lfDebug('decart realtime connected');
+      const remoteTrack = remote.videoTrack && remote.videoTrack.mediaStreamTrack;
+      if (!remoteTrack) throw new Error('Xmax returned no video track');
+      deliverLiveRemote(new MediaStream([remoteTrack]));
+      lfDebug('xmax realtime connected');
     } catch (e) {
-      lfDebug('decart failed: ' + (e && e.message || e));
+      lfDebug('xmax failed: ' + (e && e.message || e));
       lfShowError((e && e.message) || String(e));
     }
   }
@@ -1965,9 +1960,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       return;
     }
 
-    // Decart (native SDK) path: its own signaling + WebRTC, returns the transformed stream directly.
-    if (lucyProvider() === 'decart') {
-      await startDecartLive(prompt);
+    // Xmax (X2.1) path: its own realtime session, returns the transformed stream directly.
+    if (lucyProvider() === 'xmax') {
+      await startXmaxLive(prompt);
       return;
     }
 
@@ -2054,7 +2049,12 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     lfClearConnectTimer();
     if (lfPc) { try { lfPc.close(); } catch(e){} lfPc = null; }
     if (lfConnection) { try { lfConnection.close ? lfConnection.close() : lfConnection.send({ close: true }); } catch(e){} lfConnection = null; }
-    if (lfDecart) { try { lfDecart.disconnect(); } catch(e){} lfDecart = null; }
+    if (lfXmax) {
+      const sess = lfXmax; lfXmax = null;
+      try { sess.realtime.close(); } catch(e){}
+      // Release the temporary key server-side (best effort).
+      authHeader().then(h => fetch('/api/fal-realtime-token', { method: 'POST', headers: { 'Content-Type': 'application/json', ...h }, body: JSON.stringify({ provider: 'xmax', action: 'revoke', temporaryApiKey: sess.tk }) })).catch(() => {});
+    }
     if (lfLocalStream) { lfLocalStream.getTracks().forEach(t => t.stop()); lfLocalStream = null; }
     lfRemoteVideo.srcObject = null;
     lfRemoteVideo.style.display = 'none';
@@ -5493,7 +5493,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   }
   function planLimitMessage(e){
     const raw = String((e && e.message) || e || '').slice(0, 120);
-    const who = selectedCallSource === 'avatar' ? 'Anam' : 'Decart/Fal';
+    const who = selectedCallSource === 'avatar' ? 'Anam' : 'Xmax/Fal';
     return `${who} refused to start a session: "${raw}". This is the number of sessions open at the same time, not your minutes - `
       + `the plan allows only one, and another is still open (an earlier call that has not timed out yet, another tab or device, or the ${who} dashboard playground). `
       + `Close it or wait a minute, then try again.`;

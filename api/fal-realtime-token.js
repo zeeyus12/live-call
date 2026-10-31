@@ -17,26 +17,42 @@ export default async function handler(req, res) {
 
   const { app, provider } = req.body || {};
 
-  // Decart (native): mint a short-lived client token (ek_...) with the caller's OWN
-  // Decart key. The permanent key never reaches the browser. Kept in this file
-  // because Vercel Hobby caps a project at 12 functions.
-  if (provider === 'decart') {
-    const decartKey = await getProviderKey(supabase, userId, 'decart');
-    if (!decartKey) return res.status(400).json({ error: 'Add your Decart API key in Profile > API first' });
+  // Xmax (X2.1): mint a short-lived TEMPORARY key (tk-...) from the caller's OWN
+  // permanent Xmax key (saved in Profile > API, or XMAX_API_KEY on the server).
+  // The permanent key never reaches the browser. Kept in this file because
+  // Vercel Hobby caps a project at 12 functions.
+  // Also handles {provider:'xmax', action:'revoke', temporaryApiKey} to deactivate a key at call end.
+  if (provider === 'xmax') {
+    const xmaxBase = 'https://api.xmax.ai/open/api/v1';
+    const permanentKey = (await getProviderKey(supabase, userId, 'xmax')) || process.env.XMAX_API_KEY;
+    if (!permanentKey) return res.status(400).json({ error: 'Add your Xmax API key in Profile > API first' });
     try {
-      const r = await fetch('https://api.decart.ai/v1/client/tokens', {
+      if (req.body && req.body.action === 'revoke') {
+        const tk = String(req.body.temporaryApiKey || '');
+        if (!/^tk-[\w-]+$/.test(tk)) return res.status(400).json({ error: 'Bad temporary key' });
+        await fetch(`${xmaxBase}/temporary-api-key/${encodeURIComponent(tk)}/inactive`, {
+          method: 'PUT', headers: { 'X-Api-Key': permanentKey },
+        }).catch(() => {});
+        return res.status(200).json({ ok: true });
+      }
+      const r = await fetch(`${xmaxBase}/temporary-api-key`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-KEY': decartKey },
-        body: JSON.stringify({}),
+        headers: { 'Content-Type': 'application/json', 'X-Api-Key': permanentKey },
+        body: JSON.stringify({
+          expireSeconds: 3600,
+          pointsLimit: Number(process.env.XMAX_POINTS_LIMIT) || 3000,
+          temporaryApiKeySessionLimit: 1,
+        }),
       });
       const raw = await r.text();
       let data = null; try { data = JSON.parse(raw); } catch (e) { /* not json */ }
-      const apiKey = data && (data.apiKey || data.api_key || data.token);
-      if (!r.ok || !apiKey) {
-        console.error(`[decart-token] ${r.status} from Decart: ${raw.slice(0, 300)}`);
-        return res.status(r.ok ? 502 : r.status).json({ error: `Decart returned ${r.status}: ${(data && (data.error || data.message)) || raw.slice(0, 200) || 'no body'}` });
+      const d = data && data.data;
+      if (!r.ok || !data || !data.success || !d || !d.temporaryApiKey) {
+        const msg = (data && (data.message || data.error)) || raw.slice(0, 200) || 'no body';
+        console.error(`[xmax-token] ${r.status} from Xmax: ${raw.slice(0, 300)}`);
+        return res.status(r.ok ? 502 : r.status).json({ error: `Xmax returned ${r.status}: ${msg}` });
       }
-      return res.status(200).json({ apiKey, expiresAt: data.expiresAt || data.expires_at || null });
+      return res.status(200).json({ temporaryApiKey: d.temporaryApiKey, expireTimestamp: d.expireTimestamp || null });
     } catch (err) {
       return res.status(500).json({ error: err.message || String(err) });
     }

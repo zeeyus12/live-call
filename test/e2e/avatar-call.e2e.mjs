@@ -149,7 +149,7 @@ async function runScenario(browser, name, { anam = {}, wacalls = {}, endMode = '
       if (u.origin === `http://127.0.0.1:${APP_PORT}` && u.pathname.startsWith('/api/')) {
         const body = req.postData() ? JSON.parse(req.postData()) : {};
         let out = {};
-        if (u.pathname === '/api/keys') out = { anam: true, fal: true, decart: true };
+        if (u.pathname === '/api/keys') out = { anam: true, fal: true, xmax: true };
         else if (u.pathname === '/api/anam') {
           if (u.searchParams.get('resource') === 'avatars') out = { avatars: [{ id: 'av1', name: 'Test avatar' }] };
           else if (u.searchParams.get('resource') === 'voices') out = { voices: [{ id: 'v1', name: 'Test voice' }] };
