@@ -1856,7 +1856,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       // Xmax opens its own camera capture; release the preview capture so the two don't fight.
       if (lfLocalStream) { lfLocalStream.getTracks().forEach(t => t.stop()); lfLocalStream = null; }
       const client = new X.XmaxClient(new X.XmaxConfiguration({ apiKey: tk.temporaryApiKey, environment: X.XmaxEnvironment.global }));
-      const realtime = client.createRealtimeManager(new X.RealtimeConfiguration({ model: X.RealtimeModel.x2_1 }));
+      const realtime = client.createRealtimeManager(new X.RealtimeConfiguration({ model: X.RealtimeModel.x2_1_1_preview_us }));
       lfStatus.textContent = 'Starting camera…';
       const localStream = await realtime.createLocalCameraStream({
         videoFormat: new X.RealtimeVideoFormat({ width: 720, height: 1280, fps: 15 }),
