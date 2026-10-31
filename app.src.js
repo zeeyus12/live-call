@@ -1859,7 +1859,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
       const realtime = client.createRealtimeManager(new X.RealtimeConfiguration({ model: X.RealtimeModel.x2_1_1_preview_us }));
       lfStatus.textContent = 'Starting camera…';
       const localStream = await realtime.createLocalCameraStream({
-        videoFormat: new X.RealtimeVideoFormat({ width: 720, height: 1280, fps: 15 }),
+        videoFormat: new X.RealtimeVideoFormat({ width: 1024, height: 1920, fps: 15 }),
         position: X.CameraPosition.front,
         useMicrophone: false,
       });
