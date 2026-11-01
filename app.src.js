@@ -1858,22 +1858,40 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
       // Pinned SDK: 1.0.10 (published 17 Oct, at least two weeks old).
       const X = await import('https://esm.sh/@xmaxai/web-sdk@1.0.10');
-      // Xmax opens its own camera capture; release the preview capture so the two don't fight.
       if (lfLocalStream) { lfLocalStream.getTracks().forEach(t => t.stop()); lfLocalStream = null; }
       const client = new X.XmaxClient(new X.XmaxConfiguration({ apiKey: tk.temporaryApiKey, environment: X.XmaxEnvironment.global }));
       const realtime = client.createRealtimeManager(new X.RealtimeConfiguration({ model: X.RealtimeModel.x2_1_1_preview_us }));
       lfStatus.textContent = 'Starting camera…';
-      const localStream = await realtime.createLocalCameraStream({
-        videoFormat: new X.RealtimeVideoFormat({ width: 1024, height: 1920, fps: 15 }),
-        position: X.CameraPosition.front,
-        useMicrophone: false,
+      // Our own camera capture, flipped left/right into a canvas before Xmax sees it,
+      // so the output keeps the person's true left/right. The self-view keeps the raw camera.
+      const cam = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 1024 }, height: { ideal: 1920 }, frameRate: { ideal: 15, max: 15 } },
       });
-      lfXmax = { realtime, tk: tk.temporaryApiKey };
-      const selfTrack = localStream.videoTrack && localStream.videoTrack.mediaStreamTrack;
-      if (selfTrack) {
-        lfLocalStream = new MediaStream([selfTrack]);
-        const selfVid = $('socialSelfVideo'); if (selfVid) selfVid.srcObject = lfLocalStream;
-      }
+      lfLocalStream = cam;
+      const selfVid = $('socialSelfVideo'); if (selfVid) selfVid.srcObject = cam;
+      const camVid = document.createElement('video');
+      camVid.muted = true; camVid.playsInline = true; camVid.srcObject = cam;
+      await camVid.play().catch(() => {});
+      const canvas = document.createElement('canvas');
+      canvas.width = 1024; canvas.height = 1920;
+      const cctx = canvas.getContext('2d');
+      const drawFlipped = () => {
+        const vw = camVid.videoWidth, vh = camVid.videoHeight;
+        if (!vw || !vh) return;
+        const scale = Math.max(canvas.width / vw, canvas.height / vh);
+        const sw = canvas.width / scale, sh = canvas.height / scale;
+        cctx.save(); cctx.translate(canvas.width, 0); cctx.scale(-1, 1);
+        cctx.drawImage(camVid, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, canvas.width, canvas.height);
+        cctx.restore();
+      };
+      drawFlipped();
+      const timer = setInterval(drawFlipped, 1000 / 15);
+      const flippedTrack = canvas.captureStream(15).getVideoTracks()[0];
+      const localStream = await realtime.createExternalVideoStream({
+        videoTrack: flippedTrack,
+        videoFormat: new X.RealtimeVideoFormat({ width: 1024, height: 1920, fps: 15 }),
+      });
+      lfXmax = { realtime, tk: tk.temporaryApiKey, timer };
       lfStatus.textContent = 'Opening connection…';
       const remote = await realtime.startGeneration({
         localStream,
@@ -2059,6 +2077,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     }
     if (lfXmax) {
       const sess = lfXmax; lfXmax = null;
+      if (sess.timer) clearInterval(sess.timer);
       try { sess.realtime.close(); } catch(e){}
       // Release the temporary key server-side (best effort).
       authHeader().then(h => fetch('/api/fal-realtime-token', { method: 'POST', headers: { 'Content-Type': 'application/json', ...h }, body: JSON.stringify({ provider: 'xmax', action: 'revoke', temporaryApiKey: sess.tk }) })).catch(() => {});
