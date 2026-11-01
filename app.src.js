@@ -1623,7 +1623,6 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     stream: null,
     listeners: new Set(),
     forSocialCall: false,
-    flipX: false, // true while Xmax output is shown: it comes back mirrored
     setStream(s){
       this.stream = s;
       this.listeners.forEach(fn => { try { fn(s); } catch(e){} });
@@ -1819,9 +1818,10 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   let lfXmax = null; // { realtime, tk } while a session is up
   // Shared output path for any provider that returns a remote MediaStream.
   function deliverLiveRemote(stream){
-    LiveSwapMediaSource.flipX = true;
+    // The page CSS mirrors these videos (selfie view). Xmax output must show true orientation
+    // (right hand on the right), so turn that mirror off for this output only.
     for (const el of [lfRemoteVideo, $('socialRemoteVideo'), $('prepAvatarPreview')]) {
-      if (el) el.style.transform = 'scaleX(-1)';
+      if (el) el.style.transform = 'none';
     }
     lfRemoteVideo.srcObject = stream;
     LiveSwapMediaSource.setStream(stream);
@@ -2054,7 +2054,6 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
     lfClearConnectTimer();
     if (lfPc) { try { lfPc.close(); } catch(e){} lfPc = null; }
     if (lfConnection) { try { lfConnection.close ? lfConnection.close() : lfConnection.send({ close: true }); } catch(e){} lfConnection = null; }
-    LiveSwapMediaSource.flipX = false;
     for (const el of [lfRemoteVideo, $('socialRemoteVideo'), $('prepAvatarPreview')]) {
       if (el) el.style.transform = '';
     }
@@ -2254,17 +2253,11 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   }
   // H264-END
   function drawCover(ctx, vid, cw, ch){
-    // Xmax's output comes back mirrored (left/right swapped); flip it back so it matches the person.
-    const flip = !!(window.LiveSwapMediaSource && LiveSwapMediaSource.flipX);
-    if (flip) { ctx.save(); ctx.translate(cw, 0); ctx.scale(-1, 1); }
     const vw = vid.videoWidth, vh = vid.videoHeight;
-    if (!vw || !vh) { ctx.drawImage(vid, 0, 0, cw, ch); }
-    else {
-      const scale = Math.max(cw / vw, ch / vh);
-      const sw = cw / scale, sh = ch / scale;
-      ctx.drawImage(vid, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, cw, ch);
-    }
-    if (flip) ctx.restore();
+    if (!vw || !vh) { ctx.drawImage(vid, 0, 0, cw, ch); return; }
+    const scale = Math.max(cw / vw, ch / vh);
+    const sw = cw / scale, sh = ch / scale;
+    ctx.drawImage(vid, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, cw, ch);
   }
   // Asks the server to force-end every running Anam session (Anam's own stop-session API),
   // instead of trusting the browser's WebRTC close to be noticed quickly.
